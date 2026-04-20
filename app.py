@@ -181,7 +181,6 @@ def parse_column_blob(blob):
     from decimal import Decimal as D
     blob = re.sub(r"(?i)Quantity\s*Product\s*Price\s*Warehouse\s*Lead\s*Time\s*Coded\s*","",blob)
     blob = re.sub(r"(?i)Description\s*QTY\s*BOTT[A-Z\s]*Lead\s*time\s*","",blob)
-    # Gebruik prijs als anker om records te extraheren
     pattern = re.compile(
         r"((?:FCL|FTL|\d[\d,]*\s*(?:btls?|cs|cases?)).*?)"
         r"((?:Euro|\u20ac|\$|USD)\s*[\d]+[,.]?[\d]*\s*/(?:btl|cs))"
@@ -192,8 +191,9 @@ def parse_column_blob(blob):
     rows = []
     for pre, price_raw, post in pattern.findall(blob):
         pre = pre.strip()
-        # Verwijder eventuele T1/T2 cijfer prefix die overblijft van vorig record
-        pre = re.sub(r"^\d(?=\d{3,})", "", pre)
+        # Strip T1/T2 digit prefix left over from previous record
+        # Pattern: single digit 1 or 2 before a large number = T1 or T2 leftover
+        pre = re.sub(r"^[12](?=\d{3,})", "", pre)
         pre = re.sub(r"^(T[12]|Coded)\s*","",pre,flags=re.I)
         qty_match = re.match(r"(?i)^(FCL|FTL)\s*(.*)", pre)
         num_match = re.match(r"(?i)^([\d,]+)\s*(btls?|cs|cases?)\s*(.*)", pre)
@@ -205,52 +205,90 @@ def parse_column_blob(blob):
             product_raw = num_match.group(3).strip()
         else:
             qty_type, qty, product_raw = "FTL", 0, pre
-        # Extract "6/70/40" -> btls=6, size=70cl, abv=40%
+
         btls_case = size_cl = abv = None
+        # "6/ 50/40" or "6/70/40" -> btls=6, size=70cl, abv=40%
         sm = re.search(r"\b(\d+)/\s*(\d+)/\s*(\d+)\b", product_raw)
         if sm:
-            btls_case, size_cl, abv = int(sm.group(1)), int(sm.group(2)), float(sm.group(3))
+            btls_case = int(sm.group(1))
+            size_cl = int(sm.group(2))
+            abv = float(sm.group(3))
             product_raw = (product_raw[:sm.start()] + " " + product_raw[sm.end():]).strip()
+
+        # "100cl 40%" or "70cl" alone - size without btls_case
         if size_cl is None:
             cm = re.search(r"\b(\d+)cl\b", product_raw, re.I)
             if cm: size_cl = int(cm.group(1))
+
+        # ABV%
         if abv is None:
             am = re.search(r"\b(\d{1,2}(?:[.,]\d+)?)%\b", product_raw)
             if am: abv = float(am.group(1).replace(",","."))
+
         gbx = "GBX" if re.search(r"(?i)\b(gbx|ngbx)\b", product_raw) else ""
         rf_nrf = "NRF" if re.search(r"(?i)\bNRF\b|\bnon.?ref\b", product_raw) else "REF"
+
+        # Clean product name
         product = re.sub(r"(?i)\b(ref|ngbx|gbx|nrf)\b","",product_raw)
         product = re.sub(r"\(glass bottle\)","",product,flags=re.I)
         product = re.sub(r"\b\d{1,2}(?:[.,]\d+)?%","",product)
-        product = re.sub(r"\s+"," ",product).strip(" .,-")
-        # Prijs
+        product = re.sub(r"\b\d+cl\b","",product,flags=re.I)  # strip "100cl" from name
+        product = re.sub(r"\b40%\b|\b35%\b","",product)  # strip ABV from name
+        # Strip warehouse/location names that end up in product
+        product = re.sub(r"(?i)\s*/\s*newcorp.*$","",product)
+        product = re.sub(r"(?i)\s*/\s*loendersloot.*$","",product)
+        product = re.sub(r"(?i)\bon\s+the\s+floor\b","",product)
+        product = re.sub(r"(?i)\bthe\s+floor\b","",product)
+        product = re.sub(r"(?i)\b(week\s+of\s+may|third\s+week.*$)","",product)
+        product = re.sub(r"\s+"," ",product).strip(" .,-/")
+
+        # Price
         pv = re.search(r"[\d]+[,.]?[\d]*", price_raw)
         price_num = pv.group().replace(",",".") if pv else None
         currency = "USD" if re.search(r"(?i)\$|USD", price_raw) else "EUR"
+
         # Post: warehouse, leadtime, status
         post = re.sub(r"(?i)(?<!\s)(On the floor|On floor|Coded|T[12])", r" \1", post)
         inc = re.search(r"(?i)\b(DAP\s+[A-Za-z]+(?:\s+[A-Za-z]+)?|Exw(?:orks)?\s+[A-Za-z]+(?:\s+[A-Za-z]+)?|EXW\s+[A-Za-z]+)", post)
         incoterms = re.sub(r"(?i)\bExw\b","Exworks",inc.group(1)) if inc else ""
+        # Strip leadtime/week info that ended up in incoterms
+        incoterms = re.sub(r"(?i)\s+(third|second|first|fourth|week|of|on|floor|coded).*$","",incoterms).strip()
+        incoterms = re.sub(r"(?i)\s+On$","",incoterms).strip()
+
         st_m = re.search(r"(?i)\bT[12]\b", post)
         st = st_m.group(0).upper() if st_m else ""
+
         lm = re.search(r"(?i)(on\s+(?:the\s+)?floor|\d+\s*-\s*\d+\s*(?:weeks?|days?)|\d+\s*(?:weeks?|days?)|(?:first|second|third|fourth)\s+week\s+of\s+[a-z]+|mid\s+[a-z]+)", post)
         if lm:
             lt = lm.group(1).lower().strip()
             if "floor" in lt: leadtime = "On floor"
-            elif m2 := re.match(r"(\d+)\s*-\s*(\d+)\s*weeks?", lt): leadtime = f"{int(m2.group(1))*5}-{int(m2.group(2))*5} Days"
-            elif m2 := re.match(r"(\d+)\s*weeks?", lt): w=int(m2.group(1)); leadtime = f"{w*5}-{(w+1)*5} Days"
-            elif m2 := re.match(r"(\d+)\s*-\s*(\d+)\s*days?", lt): leadtime = f"{m2.group(1)}-{m2.group(2)} Days"
+            elif m2 := re.match(r"(\d+)\s*-\s*(\d+)\s*weeks?", lt):
+                leadtime = f"{int(m2.group(1))*5}-{int(m2.group(2))*5} Days"
+            elif m2 := re.match(r"(\d+)\s*weeks?", lt):
+                w=int(m2.group(1)); leadtime = f"{w*5}-{(w+1)*5} Days"
+            elif m2 := re.match(r"(\d+)\s*-\s*(\d+)\s*days?", lt):
+                leadtime = f"{m2.group(1)}-{m2.group(2)} Days"
             elif re.match(r"(?i)(first|second|third|fourth)\s+week", lt):
                 ord_map={"first":"1","second":"2","third":"3","fourth":"4"}
                 pts = lt.split(); leadtime = f"Week {ord_map.get(pts[0],'?')} {pts[-1].capitalize()}"
             else: leadtime = lm.group(1)
         else: leadtime = ""
+
         cases_moq = "FTL" if qty_type == "FTL" else (qty // btls_case if qty_type == "BTLS" and btls_case else qty)
         price_d = D(price_num) if price_num else None
         btl_price = f"{currency} {price_d:.2f}" if price_d else ""
         case_price = f"{currency} {price_d * D(str(btls_case)):.2f}" if price_d and btls_case else ""
         remark = "CODED" if re.search(r"(?i)\bcoded\b", post) else ""
         infer = infer_commodity(product, size_cl)
+
+        missing = [x for x in [
+            "Missing Btls Case" if not btls_case else "",
+            "Missing Size CL" if not size_cl else "",
+            "Missing ABV % (handmatig invullen)" if not abv else "",
+            "Missing Incoterms" if not incoterms else "",
+            "Missing Leadtime" if not leadtime else "",
+        ] if x]
+
         rows.append(build_output_row({
             "Commodity": infer, "Product": product, "GBX": gbx,
             "Btls Case": btls_case, "Size CL": size_cl, "ABV %": abv,
@@ -258,15 +296,9 @@ def parse_column_blob(blob):
             "Purchase Price - Bottle": btl_price, "Purchase Price - Case": case_price,
             "Currency": currency, "Incoterms": incoterms, "Leadtime": leadtime,
             "Remark/BBD": remark, "Source Row": "blob",
-            "Parse Status": "REVIEW" if not (btls_case and size_cl) else "OK",
-            "Review Flag": "YES" if not (btls_case and size_cl) else "NO",
-            "Review Notes": "; ".join(filter(None,[
-                "Missing Btls Case" if not btls_case else "",
-                "Missing Size CL" if not size_cl else "",
-                "Missing ABV % (handmatig invullen)" if not abv else "",
-                "Missing Incoterms" if not incoterms else "",
-                "Missing Leadtime" if not leadtime else "",
-            ])),
+            "Parse Status": "REVIEW" if missing else "OK",
+            "Review Flag": "YES" if missing else "NO",
+            "Review Notes": "; ".join(missing),
         }))
     return ensure_jvh_columns(pd.DataFrame(rows)) if rows else pd.DataFrame()
 
