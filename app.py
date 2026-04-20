@@ -106,7 +106,8 @@ def parse_decimal(v):
 
 def format_money(v, currency):
     if v is None: return ""
-    return f"{currency} {v:.2f}" if currency in ("EUR","USD") else f"{v:.2f}"
+    # Alleen cijfer, geen currency prefix (oranje kolommen)
+    return f"{v:.2f}"
 
 def detect_currency(*values):
     joined = " ".join(clean_text(v).lower() for v in values if clean_text(v))
@@ -176,8 +177,9 @@ def build_output_row(data):
     row = {col:"" for col in JVH_COLUMNS}
     row.update(data)
     row["# btls case"] = row.get("Btls Case","")
-    row["Price per bottle"] = row.get("Purchase Price - Bottle","")
-    row["Price per Case"] = row.get("Purchase Price - Case","")
+    # Price per bottle / Price per Case leeg laten (verkoopprijs — vult Joep zelf in)
+    row["Price per bottle"] = ""
+    row["Price per Case"] = ""
     return row
 
 def parse_column_blob(blob):
@@ -280,8 +282,8 @@ def parse_column_blob(blob):
 
         cases_moq = "FTL" if qty_type == "FTL" else (qty // btls_case if qty_type == "BTLS" and btls_case else qty)
         price_d = D(price_num) if price_num else None
-        btl_price = f"{currency} {price_d:.2f}" if price_d else ""
-        case_price = f"{currency} {price_d * D(str(btls_case)):.2f}" if price_d and btls_case else ""
+        btl_price = f"{price_d:.2f}" if price_d else ""
+        case_price = f"{price_d * D(str(btls_case)):.2f}" if price_d and btls_case else ""
         remark = "CODED" if re.search(r"(?i)\bcoded\b", post) else ""
         infer = infer_commodity(product, size_cl)
 
@@ -467,8 +469,8 @@ def parse_vertical_offer(text):
                 "Commodity": commodity, "Product": product, "GBX": gbx,
                 "Btls Case": btls_case, "Size CL": size_cl, "ABV %": abv,
                 "RF NRF": rf_nrf, "ST": st, "Cases MOQ": "",
-                "Purchase Price - Bottle": f"{currency} {btl_d:.2f}" if btl_d else "",
-                "Purchase Price - Case": f"{currency} {ctn_d:.2f}" if ctn_d else "",
+                "Purchase Price - Bottle": f"{btl_d:.2f}" if btl_d else "",
+                "Purchase Price - Case": f"{ctn_d:.2f}" if ctn_d else "",
                 "Currency": currency, "Incoterms": incoterms, "Leadtime": "",
                 "Remark/BBD": "", "Source Row": str(i + header_end + 1),
                 "Parse Status": "REVIEW" if missing else "OK",
