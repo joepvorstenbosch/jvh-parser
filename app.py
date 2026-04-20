@@ -45,9 +45,9 @@ st.markdown("""
 
 JVH_COLUMNS = [
     "Commodity","Product","GBX","Btls Case","Size CL","ABV %","RF NRF","ST",
-    "Cases MOQ","# btls case","Freight cost","Cost per case",
-    "Purchase Price - Bottle","Purchase Price - Case","Margin case","Margin, %",
-    "Price per bottle","Price per Case","Currency","Incoterms","Leadtime",
+    "Cases MOQ","# btls case","Freight cost","Currency",
+    "Purchase Price - Bottle","Purchase Price - Case","Cost per case","Margin case","Margin, %",
+    "Price per bottle","Price per Case","Incoterms","Leadtime",
     "Remark/BBD","Source Row","Parse Status","Review Flag","Review Notes",
 ]
 
@@ -106,8 +106,8 @@ def parse_decimal(v):
 
 def format_money(v, currency):
     if v is None: return ""
-    # Alleen cijfer, geen currency prefix (oranje kolommen)
-    return f"{v:.2f}"
+    # Europese notatie: komma als decimaalscheiding
+    return f"{v:.2f}".replace(".", ",")
 
 def detect_currency(*values):
     joined = " ".join(clean_text(v).lower() for v in values if clean_text(v))
@@ -282,8 +282,8 @@ def parse_column_blob(blob):
 
         cases_moq = "FTL" if qty_type == "FTL" else (qty // btls_case if qty_type == "BTLS" and btls_case else qty)
         price_d = D(price_num) if price_num else None
-        btl_price = f"{price_d:.2f}" if price_d else ""
-        case_price = f"{price_d * D(str(btls_case)):.2f}" if price_d and btls_case else ""
+        btl_price = f"{price_d:.2f}".replace(".", ",") if price_d else ""
+        case_price = f"{price_d * D(str(btls_case)):.2f}".replace(".", ",") if price_d and btls_case else ""
         remark = "CODED" if re.search(r"(?i)\bcoded\b", post) else ""
         infer = infer_commodity(product, size_cl)
 
@@ -469,8 +469,8 @@ def parse_vertical_offer(text):
                 "Commodity": commodity, "Product": product, "GBX": gbx,
                 "Btls Case": btls_case, "Size CL": size_cl, "ABV %": abv,
                 "RF NRF": rf_nrf, "ST": st, "Cases MOQ": "",
-                "Purchase Price - Bottle": f"{btl_d:.2f}" if btl_d else "",
-                "Purchase Price - Case": f"{ctn_d:.2f}" if ctn_d else "",
+                "Purchase Price - Bottle": f"{btl_d:.2f}".replace(".", ",") if btl_d else "",
+                "Purchase Price - Case": f"{ctn_d:.2f}".replace(".", ",") if ctn_d else "",
                 "Currency": currency, "Incoterms": incoterms, "Leadtime": "",
                 "Remark/BBD": "", "Source Row": str(i + header_end + 1),
                 "Parse Status": "REVIEW" if missing else "OK",
