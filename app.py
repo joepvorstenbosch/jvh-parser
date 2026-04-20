@@ -2,14 +2,46 @@
 from __future__ import annotations
 import io, re
 from decimal import Decimal, InvalidOperation
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional
 import pandas as pd
 import streamlit as st
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-st.set_page_config(page_title="JVH Offer Parser", page_icon="🥃", layout="wide")
+st.set_page_config(page_title="JVH Global — Offer Parser", page_icon="🥃", layout="wide")
+
+st.markdown("""
+<style>
+  [data-testid="stAppViewContainer"] { background-color: #0d1b2a; color: #f0f0f0; }
+  [data-testid="stHeader"] { background-color: #0d1b2a; }
+  h1, h2, h3 { color: #f0a500 !important; font-family: Georgia, serif; }
+  p, label, .stCaption { color: #cccccc !important; }
+  .stTabs [data-baseweb="tab"] { color: #f0a500; background-color: #162233; border-radius: 6px 6px 0 0; padding: 8px 20px; }
+  .stTabs [aria-selected="true"] { background-color: #f0a500 !important; color: #0d1b2a !important; font-weight: bold; }
+  textarea, input[type="text"] { background-color: #162233 !important; color: #f0f0f0 !important; border: 1px solid #f0a500 !important; border-radius: 6px !important; }
+  .stButton > button, .stDownloadButton > button { background-color: #f0a500 !important; color: #0d1b2a !important; font-weight: bold; border: none; border-radius: 6px; }
+  .stButton > button:hover, .stDownloadButton > button:hover { background-color: #d4900a !important; }
+  [data-testid="stMetric"] { background-color: #162233; border: 1px solid #f0a500; border-radius: 8px; padding: 12px; }
+  [data-testid="stMetricValue"] { color: #f0a500 !important; font-size: 2rem !important; }
+  [data-testid="stMetricLabel"] { color: #aaaaaa !important; }
+  [data-testid="stDataFrame"] { border: 1px solid #f0a500; border-radius: 8px; }
+  .stAlert { background-color: #162233 !important; border-left: 4px solid #f0a500 !important; color: #f0f0f0 !important; }
+  .streamlit-expanderHeader { color: #f0a500 !important; background-color: #162233 !important; }
+  [data-testid="stFileUploader"] { background-color: #162233; border: 1px dashed #f0a500; border-radius: 8px; padding: 10px; }
+  .jvh-header { display: flex; align-items: center; gap: 18px; padding: 12px 0 20px 0; border-bottom: 2px solid #f0a500; margin-bottom: 24px; }
+  .jvh-header img { height: 55px; }
+  .jvh-header h1 { margin: 0; font-size: 1.8rem; color: #f0a500 !important; }
+  .jvh-header p { margin: 2px 0 0 0; font-size: 0.85rem; color: #aaaaaa !important; }
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown("""
+<div class="jvh-header">
+  <img src="https://www.jvh-global.com/assets/uploads/Rectangle-131@2x.png" alt="JVH Global">
+  <div>
+    <h1>Offer Parser</h1>
+    <p>Plak een offerte of upload een bestand → download de gestructureerde Excel</p>
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
 JVH_COLUMNS = [
     "Commodity","Product","GBX","Btls Case","Size CL","ABV %","RF NRF","ST",
@@ -22,61 +54,45 @@ JVH_COLUMNS = [
 COMMODITY_MAP = {
     "absolut":"Vodka","belvedere":"Vodka","ciroc":"Vodka","grey goose":"Vodka","smirnoff":"Vodka",
     "rum":"Rum","bacardi":"Rum","captain morgan":"Rum","sailor jerry":"Rum",
-    "gin":"Gin","tanqueray":"Gin","gin mare":"Gin","hendrick":"Gin","beefeater":"Gin","roku":"Gin",
-    "bombay":"Gin","bombay sapphire":"Gin",
-    "tequila":"Tequila","jose cuervo":"Tequila","1800":"Tequila","sierra":"Tequila",
-    "don julio":"Tequila","olmeca":"Tequila","clase azul":"Tequila",
+    "gin":"Gin","tanqueray":"Gin","gin mare":"Gin","hendrick":"Gin","beefeater":"Gin","roku":"Gin","bombay":"Gin","bombay sapphire":"Gin",
+    "tequila":"Tequila","jose cuervo":"Tequila","1800":"Tequila","sierra":"Tequila","don julio":"Tequila","olmeca":"Tequila","clase azul":"Tequila",
     "whisky":"Whisky","whiskey":"Whisky","jack daniel":"Whisky","jack daniels":"Whisky",
-    "jim beam":"Whisky","jim beam white":"Whisky","jim beam cherry":"Whisky",
-    "jim beam original":"Whisky","jim beam apple":"Whisky","jim beam honey":"Whisky",
-    "teachers":"Whisky","famous grouse":"Whisky","glenfiddich":"Whisky","glenlivet":"Whisky",
-    "hakushu":"Whisky","macallan":"Whisky","bowmore":"Whisky","dewar":"Whisky","dewars":"Whisky",
-    "johnnie walker":"Whisky","hibiki":"Whisky","jameson":"Whisky","chivas":"Whisky",
-    "grant's":"Whisky","grant s":"Whisky","lawson":"Whisky","auchentoshan":"Whisky","ballantines":"Whisky",
-    "highland park":"Whisky","royal brackla":"Whisky","aultmore":"Whisky",
-    "liqueur":"Liquor","liquor":"Liquor","aperol":"Liquor","jagermeister":"Liquor",
-    "licor 43":"Liquor","kahlua":"Liquor","malibu":"Liquor",
-    "cognac":"Cognac","hennessy":"Cognac","martell":"Cognac","camus":"Cognac",
-    "remy martin":"Cognac","rémy martin":"Cognac",
+    "jim beam":"Whisky","jim beam white":"Whisky","jim beam cherry":"Whisky","jim beam original":"Whisky","jim beam apple":"Whisky","jim beam honey":"Whisky",
+    "teachers":"Whisky","famous grouse":"Whisky","glenfiddich":"Whisky","glenlivet":"Whisky","hakushu":"Whisky","macallan":"Whisky","bowmore":"Whisky",
+    "dewar":"Whisky","dewars":"Whisky","johnnie walker":"Whisky","hibiki":"Whisky","jameson":"Whisky","chivas":"Whisky",
+    "grant's":"Whisky","grant s":"Whisky","lawson":"Whisky","auchentoshan":"Whisky","ballantines":"Whisky","highland park":"Whisky","royal brackla":"Whisky","aultmore":"Whisky",
+    "liqueur":"Liquor","liquor":"Liquor","aperol":"Liquor","jagermeister":"Liquor","licor 43":"Liquor","kahlua":"Liquor","malibu":"Liquor",
+    "cognac":"Cognac","hennessy":"Cognac","martell":"Cognac","camus":"Cognac","remy martin":"Cognac","rémy martin":"Cognac",
     "champagne":"Champagne","veuve clicquot":"Champagne",
-    "spritz":"RTD","wine":"Wines","sauvignon blanc":"Wines",
-    "jacobs creek":"Wines","oyster bay":"Wines","brancott":"Wines",
+    "spritz":"RTD","wine":"Wines","sauvignon blanc":"Wines","jacobs creek":"Wines","oyster bay":"Wines","brancott":"Wines",
     "mini":"Miniatures (5cl)","minis":"Miniatures (5cl)","miniatures":"Miniatures (5cl)",
 }
 
 SECTION_TO_COMMODITY = {
     "RUM":"Rum","TEQUILA":"Tequila","VODKA":"Vodka","WHISKY":"Whisky","WHISKEY":"Whisky",
-    "GIN":"Gin","COGNAC":"Cognac","CHAMPAGNE":"Champagne","WINE":"Wines",
-    "WINE (FCL)":"Wines","WINES":"Wines","LIQUOR":"Liquor","BEERS":"Beers","SOFTDRINKS":"Softdrinks",
+    "GIN":"Gin","COGNAC":"Cognac","CHAMPAGNE":"Champagne","WINE":"Wines","WINE (FCL)":"Wines","WINES":"Wines",
+    "LIQUOR":"Liquor","BEERS":"Beers","SOFTDRINKS":"Softdrinks",
 }
 
 COLUMN_ALIASES = {
-    "Lead Time":"Leadtime","Warehouse":"Incoterms","Coded":"ST",
-    "Cases Available (MOQ)":"Cases MOQ","Cases Available":"Cases MOQ",
+    "Lead Time":"Leadtime","Warehouse":"Incoterms","Coded":"ST","Cases Available (MOQ)":"Cases MOQ","Cases Available":"Cases MOQ",
     "RF/NRF":"RF NRF","REF/NRF":"RF NRF","producto":"Product","Producto":"Product",
-    "btl/cs":"Btls Case","Btl/cs":"Btls Case","BTLS/CS":"Btls Case",
-    "CL":"Size CL","alc %":"ABV %","ABV%":"ABV %",
-    "Price":"Price per bottle","price":"Price per bottle",
-    "cases":"Cases MOQ","CASES":"Cases MOQ","BRAND":"Product","SIZE LTR.":"Size LTR",
-    "CAP":"RF NRF","STATUS":"ST","€/BTL":"Price per bottle",
-    "EUROS/CASE":"Price per Case","ETA":"Leadtime",
+    "btl/cs":"Btls Case","Btl/cs":"Btls Case","BTLS/CS":"Btls Case","CL":"Size CL","alc %":"ABV %","ABV%":"ABV %",
+    "Price":"Price per bottle","price":"Price per bottle","cases":"Cases MOQ","CASES":"Cases MOQ","BRAND":"Product","SIZE LTR.":"Size LTR",
+    "CAP":"RF NRF","STATUS":"ST","€/BTL":"Price per bottle","EUROS/CASE":"Price per Case","ETA":"Leadtime",
 }
 
 CURRENCY_SYMBOLS = {"€":"EUR","$":"USD","eur":"EUR","usd":"USD","euro":"EUR"}
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-def clean_text(v: Any) -> str:
+def clean_text(v):
     if v is None: return ""
     t = str(v).replace("\u00a0"," ").replace("–","-").replace("—","-").replace("\u2019","'")
     return re.sub(r"[ \t]+"," ",t).strip()
 
-def parse_decimal(v: Any) -> Optional[Decimal]:
+def parse_decimal(v):
     t = clean_text(v).lower()
     if not t: return None
-    for tok in ["eur","usd","euro","€","$","per bottle","per btl","per case","/btl","/cs"]:
-        t = t.replace(tok,"")
+    for tok in ["eur","usd","euro","€","$","per bottle","per btl","per case","/btl","/cs"]: t = t.replace(tok,"")
     t = t.replace(" ","")
     if not t: return None
     if t.count(",") == 1 and t.count(".") >= 1: t = t.replace(".","").replace(",",".")
@@ -84,46 +100,44 @@ def parse_decimal(v: Any) -> Optional[Decimal]:
     try: return Decimal(t)
     except InvalidOperation: return None
 
-def format_money(v: Optional[Decimal], currency: str) -> str:
+def format_money(v, currency):
     if v is None: return ""
     return f"{currency} {v:.2f}" if currency in ("EUR","USD") else f"{v:.2f}"
 
-def detect_currency(*values: Any) -> str:
+def detect_currency(*values):
     joined = " ".join(clean_text(v).lower() for v in values if clean_text(v))
     for sym, code in CURRENCY_SYMBOLS.items():
         if sym in joined: return code
     return ""
 
-def to_int(v: Any) -> Optional[int]:
+def to_int(v):
     t = clean_text(v)
     if not t: return None
     m = re.search(r"\d+", t)
     return int(m.group()) if m else None
 
-def to_float(v: Any) -> Optional[float]:
+def to_float(v):
     d = parse_decimal(v)
     return float(d) if d is not None else None
 
-def infer_commodity(product: str, size_cl: Optional[int] = None) -> str:
+def infer_commodity(product, size_cl=None):
     p = clean_text(product).lower()
-    if size_cl == 5 or "mini" in p or re.search(r"\b5\s?cl\b", p):
-        return "Miniatures (5cl)"
+    if size_cl == 5 or "mini" in p or re.search(r"\b5\s?cl\b", p): return "Miniatures (5cl)"
     for key, commodity in COMMODITY_MAP.items():
         if key in p: return commodity
     return ""
 
-def standardize_incoterms(v: str) -> str:
+def standardize_incoterms(v):
     t = clean_text(v)
     t = re.sub(r"(?i)\bexw\b","Exworks",t)
     t = re.sub(r"(?i)\bex\b","Exworks",t)
     return t
 
-def standardize_leadtime(v: str) -> str:
+def standardize_leadtime(v):
     text = clean_text(v).replace("Lead time","").replace("Leadtime","").strip()
     t = text.lower().strip()
     if not t: return ""
-    if re.search(r"(?i)\bon\s*floor\b|\bex\s*stock\b|\bin\s*stock\b|\bstock\b|\bready\b", t):
-        return "On floor"
+    if re.search(r"(?i)\bon\s*floor\b|\bex\s*stock\b|\bin\s*stock\b|\bstock\b|\bready\b", t): return "On floor"
     m = re.match(r"(?i)^(mid|end|early|begin)\s+([a-z]+)$", t)
     if m: return m.group(1).capitalize()+" "+m.group(2).capitalize()
     m = re.match(r"(\d+)\s*-\s*(\d+)\s*days?", t)
@@ -132,27 +146,25 @@ def standardize_leadtime(v: str) -> str:
     if m: return f"{m.group(1)} Days"
     m = re.match(r"(\d+)\s*-\s*(\d+)\s*weeks?", t)
     if m:
-        lo,hi = int(m.group(1)),int(m.group(2))
-        return f"{lo*5}-{hi*5} Days"
+        lo,hi = int(m.group(1)),int(m.group(2)); return f"{lo*5}-{hi*5} Days"
     m = re.match(r"(\d+)\s*weeks?", t)
     if m:
-        w = int(m.group(1))
-        return f"{w*5}-{(w+1)*5} Days"
+        w = int(m.group(1)); return f"{w*5}-{(w+1)*5} Days"
     return text
 
-def standardize_rf(v: str) -> str:
+def standardize_rf(v):
     t = clean_text(v).upper().replace(".","")
     if not t: return "REF"
     if t in {"RF","REF","REFILLABLE"}: return "REF"
     if t in {"NRF","NON-REF","NON REF","NONREF"}: return "NRF"
     return t
 
-def ensure_jvh_columns(df: pd.DataFrame) -> pd.DataFrame:
+def ensure_jvh_columns(df):
     for col in JVH_COLUMNS:
         if col not in df.columns: df[col] = ""
     return df[JVH_COLUMNS]
 
-def build_output_row(data: Dict[str, Any]) -> Dict[str, Any]:
+def build_output_row(data):
     row = {col:"" for col in JVH_COLUMNS}
     row.update(data)
     row["# btls case"] = row.get("Btls Case","")
@@ -160,18 +172,13 @@ def build_output_row(data: Dict[str, Any]) -> Dict[str, Any]:
     row["Price per Case"] = row.get("Purchase Price - Case","")
     return row
 
-# ---------------------------------------------------------------------------
-# Blob splitter — voor samengesmolten PDF-kopieën
-# ---------------------------------------------------------------------------
-def detect_and_split_blob(text: str) -> str:
+def detect_and_split_blob(text):
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     blob_lines = [l for l in lines if len(l) > 150 and l.count("€") >= 2]
-    if not blob_lines:
-        return text
+    if not blob_lines: return text
     result_lines = [l for l in lines if l not in blob_lines]
     for blob in blob_lines:
         blob = re.sub(r"(?i)Description\s*QTY\s*BOTT[A-Z\s]*Lead\s*time\s*","",blob)
-        # Split eerst op scheiders
         parts = re.split(r"(?:(?:after\s+)?deposit|LOEND\.?)(?=[A-Z])", blob)
         for part in parts:
             part = part.strip().rstrip(".")
@@ -189,22 +196,13 @@ def detect_and_split_blob(text: str) -> str:
             result_lines.append(part)
     return "\n".join(result_lines)
 
-# ---------------------------------------------------------------------------
-# Preprocessor
-# ---------------------------------------------------------------------------
-def preprocess_text(text: str) -> str:
-    for old, new in {
-        "RF.":"RF","/cs.":"/cs","/btl.":"/btl","/btl.,":"/btl,","/cs.,":"/cs,",
-        " at ":" @ "," per bottle":" /btl"," per case":" /cs",
-        " per cs":" /cs"," per btl":" /btl",
-    }.items():
+def preprocess_text(text):
+    for old, new in {"RF.":"RF","/cs.":"/cs","/btl.":"/btl","/btl.,":"/btl,","/cs.,":"/cs,"," at ":" @ "," per bottle":" /btl"," per case":" /cs"," per cs":" /cs"," per btl":" /btl"}.items():
         text = text.replace(old, new)
     cleaned = []
     for raw in text.splitlines():
         line = raw.strip()
-        if not line:
-            cleaned.append("")
-            continue
+        if not line: cleaned.append(""); continue
         line = re.sub(r"^[-*•]\s*","",line)
         line = re.sub(r"(?<=\d),(?=\d{3}\b)","",line)
         line = line.replace("–","-").replace("—","-")
@@ -229,10 +227,7 @@ def preprocess_text(text: str) -> str:
         cleaned.append(line)
     return "\n".join(cleaned)
 
-# ---------------------------------------------------------------------------
-# Main parser
-# ---------------------------------------------------------------------------
-def parse_offer_text(text: str) -> pd.DataFrame:
+def parse_offer_text(text):
     text = detect_and_split_blob(text)
     text = preprocess_text(text)
     rows = []
@@ -256,10 +251,8 @@ def parse_offer_text(text: str) -> pd.DataFrame:
         line = clean_text(raw_line)
         if not line: continue
         upper = line.upper()
-
         if upper.rstrip(":") in SECTION_TO_COMMODITY:
-            current_section = SECTION_TO_COMMODITY[upper.rstrip(":")]
-            continue
+            current_section = SECTION_TO_COMMODITY[upper.rstrip(":")]; continue
         if upper.startswith("BBD:") or "MOQ:" in upper:
             m = re.search(r"(?i)bbd:\s*([^-]+(?:[-/][^-]+)?)", line)
             if m: trailing_bbd = clean_text(m.group(1))
@@ -267,8 +260,7 @@ def parse_offer_text(text: str) -> pd.DataFrame:
             if m: trailing_moq = int(m.group(1).replace(",",""))
             continue
         if "CODED" in upper and "ALL ITEMS" in upper:
-            default_coded = True
-            continue
+            default_coded = True; continue
 
         is_ftl = bool(re.search(r"(?i)\bFTL\b", line)) or "FTL_LINE" in line
         qty_match = re.search(r"(?i)([\d,]+)\s*(cases|case|cs|bottles|bottle|btls)\b", line)
@@ -290,18 +282,15 @@ def parse_offer_text(text: str) -> pd.DataFrame:
         btls_case = None; size_cl = None
         m = re.search(r"(?i)(\d+)x(\d+(?:\.\d+)?)l\b", line)
         if m:
-            btls_case = int(m.group(1))
-            size_cl = int(Decimal(m.group(2)) * Decimal("100"))
+            btls_case = int(m.group(1)); size_cl = int(Decimal(m.group(2)) * Decimal("100"))
         else:
             m = re.search(r"(?i)(\d+)x(\d+(?:\.\d+)?)ml\b", line)
             if m:
-                btls_case = int(m.group(1))
-                size_cl = int(Decimal(m.group(2)) / Decimal("10"))
+                btls_case = int(m.group(1)); size_cl = int(Decimal(m.group(2)) / Decimal("10"))
             else:
                 m = re.search(r"(?i)(\d+)x(\d+)cl\b", line)
                 if m:
-                    btls_case = int(m.group(1))
-                    size_cl = int(m.group(2))
+                    btls_case = int(m.group(1)); size_cl = int(m.group(2))
 
         abv_match = re.search(r"(?i)\b(\d{1,2}(?:[.,]\d+)?)%\b", line)
         abv = float(abv_match.group(1).replace(",",".")) if abv_match else None
@@ -385,7 +374,7 @@ def parse_offer_text(text: str) -> pd.DataFrame:
         }))
     return ensure_jvh_columns(pd.DataFrame(rows))
 
-def to_excel_bytes(df: pd.DataFrame) -> bytes:
+def to_excel_bytes(df):
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as w:
         df.to_excel(w, sheet_name="JVH Master", index=False)
@@ -393,59 +382,35 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
     buf.seek(0)
     return buf.getvalue()
 
-# ---------------------------------------------------------------------------
-# UI
-# ---------------------------------------------------------------------------
-st.title("🥃 JVH Global — Offer Parser")
-st.caption("Plak een offerte of upload een bestand → download de Excel")
-
 col_in, col_out = st.columns([1, 1])
 
 with col_in:
     st.subheader("📥 Input")
     tab_text, tab_file = st.tabs(["Tekst plakken", "Bestand uploaden"])
-
     with tab_text:
-        pasted = st.text_area(
-            "Plak hier de offertetekst (email, WhatsApp, etc.)",
-            height=400,
-            placeholder="Plak de volledige offertetekst hier...",
-        )
+        pasted = st.text_area("Plak hier de offertetekst (email, WhatsApp, etc.)", height=400, placeholder="Plak de volledige offertetekst hier...")
         supplier = st.text_input("Leverancier (optioneel)", placeholder="bijv. Diageo / Pernod / ...")
-
     with tab_file:
         uploaded = st.file_uploader("Upload Excel of CSV", type=["xlsx","xls","csv"])
         supplier_f = st.text_input("Leverancier (optioneel) ", placeholder="bijv. Diageo / Pernod / ...")
 
 with col_out:
     st.subheader("📤 Output")
-
     parsed_df = pd.DataFrame()
     source_label = ""
 
-    # Parse from text
     if pasted and pasted.strip():
         parsed_df = parse_offer_text(pasted)
         source_label = supplier if supplier else "offerte"
-
-    # Parse from file
     elif uploaded is not None:
         if uploaded.name.lower().endswith(".csv"):
             raw_df = pd.read_csv(uploaded)
         else:
             raw_df = pd.read_excel(uploaded)
         raw_df = raw_df.rename(columns={c: COLUMN_ALIASES.get(clean_text(c), clean_text(c)) for c in raw_df.columns})
-        # Try as free text first if single column
         if len(raw_df.columns) == 1:
-            text_blob = "\n".join(raw_df.iloc[:,0].astype(str).tolist())
-            parsed_df = parse_offer_text(text_blob)
+            parsed_df = parse_offer_text("\n".join(raw_df.iloc[:,0].astype(str).tolist()))
         else:
-            from typing import Tuple
-            def parse_table_dataframe(df):
-                cols = {clean_text(c) for c in df.columns}
-                if {"Product","Btls Case","Size LTR","ABV %","RF NRF","ST","Price per bottle","Price per Case","Leadtime","Cases MOQ"}.issubset(cols):
-                    return df, "inventory_eta_table"
-                return df, "unknown"
             parsed_df = parse_offer_text("\n".join(raw_df.astype(str).apply(" ".join, axis=1).tolist()))
         source_label = supplier_f if supplier_f else uploaded.name
 
@@ -453,35 +418,22 @@ with col_out:
         total = len(parsed_df)
         ok = int((parsed_df["Review Flag"]=="NO").sum())
         review = total - ok
-
         m1, m2, m3 = st.columns(3)
         m1.metric("Totaal regels", total)
-        m2.metric("✅ OK", ok)
-        m3.metric("⚠️ Review", review)
-
+        m2.metric("OK", ok)
+        m3.metric("Review nodig", review)
         st.dataframe(
-            parsed_df[["Commodity","Product","GBX","Btls Case","Size CL","Cases MOQ",
-                       "Purchase Price - Bottle","Purchase Price - Case","Currency",
-                       "RF NRF","ST","Incoterms","Leadtime","Remark/BBD","Parse Status"]],
-            use_container_width=True,
-            height=380,
+            parsed_df[["Commodity","Product","GBX","Btls Case","Size CL","Cases MOQ","Purchase Price - Bottle","Purchase Price - Case","Currency","RF NRF","ST","Incoterms","Leadtime","Remark/BBD","Parse Status"]],
+            use_container_width=True, height=380,
         )
-
         filename = f"JVH_{source_label.replace(' ','_')}_parsed.xlsx" if source_label else "JVH_parsed.xlsx"
-        st.download_button(
-            label="⬇️ Download Excel",
-            data=to_excel_bytes(parsed_df),
-            file_name=filename,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-            type="primary",
-        )
-
+        st.download_button(label="⬇️ Download Excel", data=to_excel_bytes(parsed_df), file_name=filename,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True, type="primary")
         if review > 0:
             with st.expander(f"⚠️ {review} regels hebben review nodig"):
-                st.dataframe(
-                    parsed_df[parsed_df["Review Flag"]=="YES"][["Product","Review Notes"]],
-                    use_container_width=True,
-                )
+                st.dataframe(parsed_df[parsed_df["Review Flag"]=="YES"][["Product","Review Notes"]], use_container_width=True)
     else:
         st.info("Plak een offerte links of upload een bestand om te beginnen.")
+
+st.markdown("---")
+st.markdown('<p style="text-align:center; color:#555; font-size:0.8rem;">JVH Global B.V. · jvh-global.com</p>', unsafe_allow_html=True)
