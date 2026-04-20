@@ -45,8 +45,8 @@ st.markdown("""
 
 JVH_COLUMNS = [
     "Commodity","Product","GBX","Btls Case","Size CL","ABV %","RF NRF","ST",
-    "Cases MOQ","# btls case","Freight cost","Currency",
-    "Purchase Price - Bottle","Purchase Price - Case","Cost per case","Margin case","Margin, %",
+    "Cases Available","# btls case","Freight cost","Cost per case",
+    "Purchase Price - Bottle","Purchase Price - Case","Margin case","Margin","Currency",
     "Price per bottle","Price per Case","Incoterms","Leadtime",
     "Remark/BBD","Source Row","Parse Status","Review Flag","Review Notes",
 ]
@@ -79,10 +79,10 @@ SECTION_TO_COMMODITY = {
 }
 
 COLUMN_ALIASES = {
-    "Lead Time":"Leadtime","Warehouse":"Incoterms","Coded":"ST","Cases Available (MOQ)":"Cases MOQ","Cases Available":"Cases MOQ",
+    "Lead Time":"Leadtime","Warehouse":"Incoterms","Coded":"ST","Cases Available (MOQ)":"Cases Available","Cases Available":"Cases Available",
     "RF/NRF":"RF NRF","REF/NRF":"RF NRF","producto":"Product","Producto":"Product",
     "btl/cs":"Btls Case","Btl/cs":"Btls Case","BTLS/CS":"Btls Case","CL":"Size CL","alc %":"ABV %","ABV%":"ABV %",
-    "Price":"Price per bottle","price":"Price per bottle","cases":"Cases MOQ","CASES":"Cases MOQ","BRAND":"Product","SIZE LTR.":"Size LTR",
+    "Price":"Price per bottle","price":"Price per bottle","cases":"Cases Available","CASES":"Cases Available","BRAND":"Product","SIZE LTR.":"Size LTR",
     "CAP":"RF NRF","STATUS":"ST","€/BTL":"Price per bottle","EUROS/CASE":"Price per Case","ETA":"Leadtime",
 }
 
@@ -105,9 +105,13 @@ def parse_decimal(v):
     except InvalidOperation: return None
 
 def format_money(v, currency):
-    if v is None: return ""
-    # Europese notatie: komma als decimaalscheiding
-    return f"{v:.2f}".replace(".", ",")
+    # Geeft een float terug zodat Excel het als getal behandelt
+    # De celopmaak in de export zorgt voor de weergave
+    if v is None: return None
+    try:
+        return float(v)
+    except:
+        return None
 
 def detect_currency(*values):
     joined = " ".join(clean_text(v).lower() for v in values if clean_text(v))
@@ -282,8 +286,8 @@ def parse_column_blob(blob):
 
         cases_moq = "FTL" if qty_type == "FTL" else (qty // btls_case if qty_type == "BTLS" and btls_case else qty)
         price_d = D(price_num) if price_num else None
-        btl_price = f"{price_d:.2f}".replace(".", ",") if price_d else ""
-        case_price = f"{price_d * D(str(btls_case)):.2f}".replace(".", ",") if price_d and btls_case else ""
+        btl_price = float(price_d) if price_d else None
+        case_price = float(price_d * D(str(btls_case))) if price_d and btls_case else None
         remark = "CODED" if re.search(r"(?i)\bcoded\b", post) else ""
         infer = infer_commodity(product, size_cl)
 
@@ -298,7 +302,7 @@ def parse_column_blob(blob):
         rows.append(build_output_row({
             "Commodity": infer, "Product": product, "GBX": gbx,
             "Btls Case": btls_case, "Size CL": size_cl, "ABV %": abv,
-            "RF NRF": rf_nrf, "ST": st, "Cases MOQ": cases_moq,
+            "RF NRF": rf_nrf, "ST": st, "Cases Available": cases_moq,
             "Purchase Price - Bottle": btl_price, "Purchase Price - Case": case_price,
             "Currency": currency, "Incoterms": incoterms, "Leadtime": leadtime,
             "Remark/BBD": remark, "Source Row": "blob",
@@ -468,9 +472,9 @@ def parse_vertical_offer(text):
             rows.append(build_output_row({
                 "Commodity": commodity, "Product": product, "GBX": gbx,
                 "Btls Case": btls_case, "Size CL": size_cl, "ABV %": abv,
-                "RF NRF": rf_nrf, "ST": st, "Cases MOQ": "",
-                "Purchase Price - Bottle": f"{btl_d:.2f}".replace(".", ",") if btl_d else "",
-                "Purchase Price - Case": f"{ctn_d:.2f}".replace(".", ",") if ctn_d else "",
+                "RF NRF": rf_nrf, "ST": st, "Cases Available": "",
+                "Purchase Price - Bottle": float(btl_d) if btl_d else None,
+                "Purchase Price - Case": float(ctn_d) if ctn_d else None,
                 "Currency": currency, "Incoterms": incoterms, "Leadtime": "",
                 "Remark/BBD": "", "Source Row": str(i + header_end + 1),
                 "Parse Status": "REVIEW" if missing else "OK",
@@ -651,7 +655,7 @@ def _parse_offer_text_inner(text):
         rows.append(build_output_row({
             "Commodity":commodity,"Product":product,"GBX":gbx,
             "Btls Case":btls_case,"Size CL":size_cl,"ABV %":abv,
-            "RF NRF":rf_nrf,"ST":st_status,"Cases MOQ":cases_moq,
+            "RF NRF":rf_nrf,"ST":st_status,"Cases Available":cases_moq,
             "Purchase Price - Bottle":format_money(bottle_price,currency),
             "Purchase Price - Case":format_money(case_price,currency),
             "Currency":currency,"Incoterms":incoterms,"Leadtime":leadtime,
@@ -663,10 +667,28 @@ def _parse_offer_text_inner(text):
     return ensure_jvh_columns(pd.DataFrame(rows))
 
 def to_excel_bytes(df):
+    from openpyxl.styles import numbers
     buf = io.BytesIO()
+    EURO_FORMAT = r'_ [$€-413]\ * #,##0.00_ ;_ [$€-413]\ * \-#,##0.00_ ;_ [$€-413]\ * "-"??_ ;_ @_ '
+    PRICE_COLS = {"Purchase Price - Bottle", "Purchase Price - Case",
+                  "Price per bottle", "Price per Case",
+                  "Freight cost", "Cost per case", "Margin case"}
+
     with pd.ExcelWriter(buf, engine="openpyxl") as w:
         df.to_excel(w, sheet_name="JVH Master", index=False)
         df[df["Review Flag"]=="YES"].copy().to_excel(w, sheet_name="Review", index=False)
+
+        for sheet_name in ["JVH Master", "Review"]:
+            ws = w.sheets[sheet_name]
+            # Apply euro format to price columns
+            for col_idx, col_name in enumerate(df.columns, start=1):
+                if col_name in PRICE_COLS:
+                    col_letter = ws.cell(1, col_idx).column_letter
+                    for row in ws.iter_rows(min_row=2, min_col=col_idx, max_col=col_idx):
+                        for cell in row:
+                            if cell.value is not None and cell.value != "":
+                                cell.number_format = EURO_FORMAT
+
     buf.seek(0)
     return buf.getvalue()
 
@@ -711,7 +733,7 @@ with col_out:
         m2.metric("OK", ok)
         m3.metric("Review nodig", review)
         st.dataframe(
-            parsed_df[["Commodity","Product","GBX","Btls Case","Size CL","Cases MOQ","Purchase Price - Bottle","Purchase Price - Case","Currency","RF NRF","ST","Incoterms","Leadtime","Remark/BBD","Parse Status"]],
+            parsed_df[["Commodity","Product","GBX","Btls Case","Size CL","Cases Available","Purchase Price - Bottle","Purchase Price - Case","Currency","RF NRF","ST","Incoterms","Leadtime","Remark/BBD","Parse Status"]],
             use_container_width=True, height=380,
         )
         filename = f"JVH_{source_label.replace(' ','_')}_parsed.xlsx" if source_label else "JVH_parsed.xlsx"
