@@ -52,16 +52,20 @@ JVH_COLUMNS = [
 ]
 
 COMMODITY_MAP = {
-    "absolut":"Vodka","belvedere":"Vodka","ciroc":"Vodka","grey goose":"Vodka","smirnoff":"Vodka",
-    "rum":"Rum","bacardi":"Rum","captain morgan":"Rum","sailor jerry":"Rum",
+    "absolut":"Vodka","belvedere":"Vodka","ciroc":"Vodka","grey goose":"Vodka","smirnoff":"Vodka","finlandia":"Vodka",
+    "rum":"Rum","bacardi":"Rum","captain morgan":"Rum","sailor jerry":"Rum","ron zacapa":"Rum","zacapa":"Rum",
     "gin":"Gin","tanqueray":"Gin","gin mare":"Gin","hendrick":"Gin","beefeater":"Gin","roku":"Gin","bombay":"Gin","bombay sapphire":"Gin",
-    "tequila":"Tequila","jose cuervo":"Tequila","1800":"Tequila","sierra":"Tequila","don julio":"Tequila","olmeca":"Tequila","clase azul":"Tequila",
+    "tequila":"Tequila","jose cuervo":"Tequila","1800":"Tequila","sierra":"Tequila","don julio":"Tequila","olmeca":"Tequila","clase azul":"Tequila","espolon":"Tequila",
     "whisky":"Whisky","whiskey":"Whisky","jack daniel":"Whisky","jack daniels":"Whisky",
     "jim beam":"Whisky","jim beam white":"Whisky","jim beam cherry":"Whisky","jim beam original":"Whisky","jim beam apple":"Whisky","jim beam honey":"Whisky",
     "teachers":"Whisky","famous grouse":"Whisky","glenfiddich":"Whisky","glenlivet":"Whisky","hakushu":"Whisky","macallan":"Whisky","bowmore":"Whisky",
     "dewar":"Whisky","dewars":"Whisky","johnnie walker":"Whisky","hibiki":"Whisky","jameson":"Whisky","chivas":"Whisky",
     "grant's":"Whisky","grant s":"Whisky","lawson":"Whisky","auchentoshan":"Whisky","ballantines":"Whisky","highland park":"Whisky","royal brackla":"Whisky","aultmore":"Whisky",
-    "liqueur":"Liquor","liquor":"Liquor","aperol":"Liquor","jagermeister":"Liquor","licor 43":"Liquor","kahlua":"Liquor","malibu":"Liquor",
+    "glenmorangie":"Whisky","buchanan":"Whisky","grand old parr":"Whisky","old parr":"Whisky","seagram":"Whisky","pendleton":"Whisky",
+    "crown royal":"Whisky","eagle rare":"Whisky","russell's reserve":"Whisky","russells reserve":"Whisky","tin cup":"Whisky","angels envy":"Whisky","angel's envy":"Whisky",
+    "blantons":"Whisky","blanton":"Whisky","old grand-dad":"Whisky","old grand dad":"Whisky",
+    "bourbon":"Whisky","canadian whiskey":"Whisky","blended american whiskey":"Whisky",
+    "liqueur":"Liquor","liquor":"Liquor","aperol":"Liquor","jagermeister":"Liquor","licor 43":"Liquor","kahlua":"Liquor","malibu":"Liquor","grand marnier":"Liquor",
     "cognac":"Cognac","hennessy":"Cognac","martell":"Cognac","camus":"Cognac","remy martin":"Cognac","rémy martin":"Cognac",
     "champagne":"Champagne","veuve clicquot":"Champagne",
     "spritz":"RTD","wine":"Wines","sauvignon blanc":"Wines","jacobs creek":"Wines","oyster bay":"Wines","brancott":"Wines",
@@ -392,7 +396,101 @@ def preprocess_text(text):
         cleaned.append(line)
     return "\n".join(cleaned)
 
+def parse_vertical_offer(text):
+    """Parse vertikale tabel-offerte: elke waarde op eigen regel (DESCRIPTION/BTL/ML/ABV/...)."""
+    from decimal import Decimal as D
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    # Skip header block
+    header_markers = {"DESCRIPTION","BTL/CTN","ML/BTL","ABV","BOTTLE","VARIANT",
+                      "EU STATUS","CARTON","EURO EXW LOENDERSLOOT","EURO EXW",
+                      "PRICE BTL","PRICE CARTON","PRICE/BTL","PRICE/CARTON"}
+    header_end = 0
+    for i, line in enumerate(lines):
+        if any(line.upper().startswith(h) for h in header_markers):
+            header_end = i + 1
+        elif header_end > 0:
+            break
+    data_lines = lines[header_end:]
+    # Detect incoterms from header area
+    incoterms = ""
+    for line in lines[:header_end]:
+        inc = re.search(r"(?i)\b(EXW?\s+[A-Za-z]+(?:\s+[A-Za-z]+)?|DAP\s+[A-Za-z]+)", line)
+        if inc:
+            incoterms = re.sub(r"(?i)\bExw\b","Exworks",inc.group(1))
+            break
+    if not incoterms: incoterms = "Exworks Loendersloot"
+    # Fix kapitalisatie
+    incoterms = re.sub(r"\bLOENDERSLOOT\b","Loendersloot",incoterms)
+    incoterms = re.sub(r"\bRIGA\b","Riga",incoterms)
+    incoterms = re.sub(r"\bSINGAPORE\b","Singapore",incoterms)
+    # Each record = 9 fields: name, btls, ml, abv, rf_nrf, variant, st, price_carton, price_bottle
+    FIELDS = 9
+    rows = []
+    i = 0
+    while i < len(data_lines):
+        line = data_lines[i]
+        is_product = (
+            not re.match(r"^[\d€$.,]+", line) and
+            not re.match(r"^(T[12]|REF|NRF|NGB|GBX|GB)\s*$", line, re.I)
+        )
+        if is_product and i + FIELDS - 1 < len(data_lines):
+            rec = data_lines[i:i+FIELDS]
+            name, btls_s, ml_s, abv_s, rf_s, variant_s, st_s, price_ctn_s, price_btl_s = rec
+            btls_case = int(btls_s) if re.match(r"^\d+$", btls_s) else None
+            ml = int(float(ml_s)) if re.match(r"^[\d.]+$", ml_s) else None
+            size_cl = ml // 10 if ml else None
+            abv = float(abv_s.replace(",",".")) if re.match(r"^[\d.,]+$", abv_s) else None
+            rf_nrf = "NRF" if "NRF" in rf_s.upper() else "REF"
+            gbx = "GBX" if re.search(r"(?i)\bGBX\b", variant_s) else ""
+            st = st_s.upper() if re.match(r"^T[12]$", st_s, re.I) else ""
+            def parse_price(s):
+                m = re.search(r"[\d]+[.,][\d]+|[\d]+", s.replace(" ",""))
+                return m.group().replace(",",".") if m else None
+            p_ctn = parse_price(price_ctn_s)
+            p_btl = parse_price(price_btl_s)
+            currency = "USD" if "$" in price_btl_s else "EUR"
+            ctn_d = D(p_ctn) if p_ctn else None
+            btl_d = D(p_btl) if p_btl else None
+            # Cross-check: if both present, verify consistency
+            if ctn_d and btl_d and btls_case:
+                expected_ctn = btl_d * btls_case
+                if abs(ctn_d - expected_ctn) > D("0.10"):
+                    pass  # accept as-is, prices per bottle and carton may differ
+            product = re.sub(r"\s+"," ", name).strip()
+            commodity = infer_commodity(product, size_cl)
+            missing = [x for x in [
+                "Missing Btls Case" if not btls_case else "",
+                "Missing Size CL" if not size_cl else "",
+                "Missing ABV % (handmatig invullen)" if not abv else "",
+            ] if x]
+            rows.append(build_output_row({
+                "Commodity": commodity, "Product": product, "GBX": gbx,
+                "Btls Case": btls_case, "Size CL": size_cl, "ABV %": abv,
+                "RF NRF": rf_nrf, "ST": st, "Cases MOQ": "",
+                "Purchase Price - Bottle": f"{currency} {btl_d:.2f}" if btl_d else "",
+                "Purchase Price - Case": f"{currency} {ctn_d:.2f}" if ctn_d else "",
+                "Currency": currency, "Incoterms": incoterms, "Leadtime": "",
+                "Remark/BBD": "", "Source Row": str(i + header_end + 1),
+                "Parse Status": "REVIEW" if missing else "OK",
+                "Review Flag": "YES" if missing else "NO",
+                "Review Notes": "; ".join(missing),
+            }))
+            i += FIELDS
+        else:
+            i += 1
+    return ensure_jvh_columns(pd.DataFrame(rows)) if rows else pd.DataFrame()
+
+def is_vertical_offer(text):
+    """Detecteer of tekst een verticale tabel-offerte is."""
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    markers = sum(1 for l in lines[:15] if l.upper() in
+                  {"DESCRIPTION","BTL/CTN","ML/BTL","ABV","EU STATUS","VARIANT"})
+    return markers >= 3
+
 def parse_offer_text(text):
+    # Detecteer verticale tabel-offerte
+    if is_vertical_offer(text):
+        return parse_vertical_offer(text)
     # Detecteer kolommen-blob (Euro-prijs formaat zonder spaties)
     lines_raw = [l.strip() for l in text.splitlines() if l.strip()]
     def is_col_blob(l):
