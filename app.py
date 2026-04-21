@@ -396,6 +396,12 @@ def preprocess_text(text):
             line = re.sub(r"\$\s*(\d+(?:[.,]\d+)?)\s*/(btl|cs)\b",r"@ USD \1 /\2",line)
         line = re.sub(r"(?i)\bex-([A-Za-z]+)",r"ex \1",line)
         line = re.sub(r"(?i)\bDuty\s*Status\s*:\s*","",line)
+        # Normalize "at 68 euro" / "at 45.90 euro" -> "@ EUR 68 /cs"
+        line = re.sub(r"(?i)\bat\s+([\d]+(?:[.,][\d]+)?)\s+euros?\b",
+                      lambda m: f"@ EUR {m.group(1).replace(',','.')} /cs", line)
+        # Normalize "at USD 68" -> "@ USD 68 /cs"
+        line = re.sub(r"(?i)\bat\s+(USD|EUR)\s+([\d]+(?:[.,][\d]+)?)\b",
+                      lambda m: f"@ {m.group(1)} {m.group(2).replace(',','.')} /cs", line)
         if not re.search(r"@\s*(EUR|USD)", line):
             line = re.sub(r"(?i)\beuro\s+(\d)",r"@ EUR \1",line)
             line = re.sub(r"(?i)\beuros\s+(\d)",r"@ EUR \1",line)
