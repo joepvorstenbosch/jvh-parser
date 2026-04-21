@@ -271,17 +271,25 @@ def parse_column_blob(blob):
         lm = re.search(r"(?i)(on\s+(?:the\s+)?floor|\d+\s*-\s*\d+\s*(?:weeks?|days?)|\d+\s*(?:weeks?|days?)|(?:first|second|third|fourth)\s+week\s+of\s+[a-z]+|mid\s+[a-z]+)", post)
         if lm:
             lt = lm.group(1).lower().strip()
-            if "floor" in lt: leadtime = "On floor"
-            elif m2 := re.match(r"(\d+)\s*-\s*(\d+)\s*weeks?", lt):
-                leadtime = f"{int(m2.group(1))*5}-{int(m2.group(2))*5} Days"
-            elif m2 := re.match(r"(\d+)\s*weeks?", lt):
-                w=int(m2.group(1)); leadtime = f"{w*5}-{(w+1)*5} Days"
-            elif m2 := re.match(r"(\d+)\s*-\s*(\d+)\s*days?", lt):
-                leadtime = f"{m2.group(1)}-{m2.group(2)} Days"
-            elif re.match(r"(?i)(first|second|third|fourth)\s+week", lt):
-                ord_map={"first":"1","second":"2","third":"3","fourth":"4"}
-                pts = lt.split(); leadtime = f"Week {ord_map.get(pts[0],'?')} {pts[-1].capitalize()}"
-            else: leadtime = lm.group(1)
+            if "floor" in lt:
+                leadtime = "On floor"
+            else:
+                m2 = re.match(r"(\d+)\s*-\s*(\d+)\s*weeks?", lt)
+                if m2:
+                    leadtime = f"{int(m2.group(1))*5}-{int(m2.group(2))*5} Days"
+                else:
+                    m2 = re.match(r"(\d+)\s*weeks?", lt)
+                    if m2:
+                        w = int(m2.group(1)); leadtime = f"{w*5}-{(w+1)*5} Days"
+                    else:
+                        m2 = re.match(r"(\d+)\s*-\s*(\d+)\s*days?", lt)
+                        if m2:
+                            leadtime = f"{m2.group(1)}-{m2.group(2)} Days"
+                        elif re.match(r"(?i)(first|second|third|fourth)\s+week", lt):
+                            ord_map = {"first":"1","second":"2","third":"3","fourth":"4"}
+                            pts = lt.split(); leadtime = f"Week {ord_map.get(pts[0],'?')} {pts[-1].capitalize()}"
+                        else:
+                            leadtime = lm.group(1)
         else: leadtime = ""
 
         cases_moq = "FTL" if qty_type == "FTL" else (qty // btls_case if qty_type == "BTLS" and btls_case else qty)
@@ -667,23 +675,22 @@ def _parse_offer_text_inner(text):
     return ensure_jvh_columns(pd.DataFrame(rows))
 
 def to_excel_bytes(df):
-    from openpyxl.styles import numbers
     buf = io.BytesIO()
     EURO_FORMAT = r'_ [$€-413]\ * #,##0.00_ ;_ [$€-413]\ * \-#,##0.00_ ;_ [$€-413]\ * "-"??_ ;_ @_ '
     PRICE_COLS = {"Purchase Price - Bottle", "Purchase Price - Case",
                   "Price per bottle", "Price per Case",
                   "Freight cost", "Cost per case", "Margin case"}
 
+    review_df = df[df["Review Flag"]=="YES"].copy() if "Review Flag" in df.columns else pd.DataFrame(columns=df.columns)
+
     with pd.ExcelWriter(buf, engine="openpyxl") as w:
         df.to_excel(w, sheet_name="JVH Master", index=False)
-        df[df["Review Flag"]=="YES"].copy().to_excel(w, sheet_name="Review", index=False)
+        review_df.to_excel(w, sheet_name="Review", index=False)
 
         for sheet_name in ["JVH Master", "Review"]:
             ws = w.sheets[sheet_name]
-            # Apply euro format to price columns
             for col_idx, col_name in enumerate(df.columns, start=1):
                 if col_name in PRICE_COLS:
-                    col_letter = ws.cell(1, col_idx).column_letter
                     for row in ws.iter_rows(min_row=2, min_col=col_idx, max_col=col_idx):
                         for cell in row:
                             if cell.value is not None and cell.value != "":
