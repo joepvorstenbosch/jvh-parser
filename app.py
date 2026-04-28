@@ -357,8 +357,6 @@ def detect_and_split_blob(text):
 
 
 def preprocess_text(text):
-    for old, new in {"RF.":"RF","/cs.":"/cs","/btl.":"/btl","/btl.,":"/btl,","/cs.,":"/cs,"," per bottle":" /btl"," per case":" /cs"," per cs":" /cs"," per btl":" /btl"}.items():
-        text = text.replace(old, new)
     cleaned = []
     for raw in text.splitlines():
         line = raw.strip()
@@ -367,50 +365,72 @@ def preprocess_text(text):
         line = re.sub(r"(?<=\d),(?=\d{3}\b)","",line)
         line = line.replace("–","-").replace("—","-")
         line = re.sub(r"(?i)^FCL\b","FTL",line)
+        # Strip WhatsApp/Telegram timestamps
+        line = re.sub(r"^\[[\d\-]+,\s*[\d:]+\]\s*[^:]+:\s*","",line)
+        # Strip "(T2 status)" -> keep T2 as standalone BEFORE stripping trailing noise
+        line = re.sub(r"\((T[12])\s+status\)", r" \1 ", line, flags=re.I)
+        # Strip parenthetical case price "(23,40€ per case)" before other processing
+        line = re.sub(r"\([^)]*€[^)]*(?:per\s+case|per\s+cs)[^)]*\)","",line,flags=re.I)
+        # Strip trailing noise but PRESERVE T1/T2 at end
+        line = re.sub(r"(?i)\s+after\s+deposit\s+confirmation\s+from\s+\w+","",line)
+        line = re.sub(r"(?i)\s+lead\s+time\b","",line)
+        # Normalize "with N,NN€ per bottle" -> "@ EUR N.NN /btl"  (BEFORE global replacements)
+        line = re.sub(r"(?i)\bwith\s+([\d]+[.,][\d]+)€\s*per\s*bottle",
+                      lambda m: f"@ EUR {m.group(1).replace(',','.')} /btl", line)
+        line = re.sub(r"(?i)\bwith\s+([\d]+)€\s*per\s*bottle",
+                      lambda m: f"@ EUR {m.group(1)} /btl", line)
+        line = re.sub(r"([\d]+[.,][\d]+)€\s*per\s*bottle",
+                      lambda m: f"@ EUR {m.group(1).replace(',','.')} /btl", line, flags=re.I)
+        line = re.sub(r"([\d]+)€\s*per\s*bottle",
+                      lambda m: f"@ EUR {m.group(1)} /btl", line, flags=re.I)
+        # Case price fallback if no bottle price
+        line = re.sub(r"(?i)\bwith\s+([\d]+[.,][\d]+)€\s*per\s*case",
+                      lambda m: f"@ EUR {m.group(1).replace(',','.')} /cs", line)
+        line = re.sub(r"([\d]+[.,][\d]+)€\s*per\s*case",
+                      lambda m: f"@ EUR {m.group(1).replace(',','.')} /cs", line, flags=re.I)
+        # Strip remaining "with" before leadtime/incoterms
+        line = re.sub(r"(?i)\bwith\s+(\d+-\d+\s*days?)", r"\1", line)
+        line = re.sub(r"(?i)\bwith\b","",line)
+        # Fix double @@
+        line = re.sub(r"@\s*@","@",line)
+        # Global simple replacements (AFTER per bottle/case specific handling)
+        for old, new in {"RF.":"RF","/cs.":"/cs","/btl.":"/btl"," per bottle":" /btl"," per case":" /cs"," per cs":" /cs"," per btl":" /btl"}.items():
+            line = line.replace(old, new)
         line = re.sub(r"\b(\d+)/(\d+)/(\d+)\b", lambda m: f"{m.group(1)}x{m.group(2)}cl {m.group(3)}%", line)
         line = re.sub(r"\(glass bottle\)","",line,flags=re.I)
         line = re.sub(r"\((\d+(?:\.\d+)?)[Ll]\s*[xX]\s*(\d+)\)", lambda m: f"{m.group(2)}x{m.group(1)}L", line)
         line = re.sub(r"\((\d+)[Cc][Ll]\s*[xX]\s*(\d+)\)", lambda m: f"{m.group(2)}x{m.group(1)}cl", line)
         line = re.sub(r"(?i)\bQty\s*:\s*","",line)
-        # Normalize "Euro 7,49/btl" or "Euro3,80/btl" -> "@ EUR 7.49 /btl"
         def fix_euro_price(line):
             def repl(m):
-                price = m.group(1).replace(',','.')
-                unit = m.group(2)
-                return f"@ EUR {price} /{unit}"
-            # With or without space after Euro, with comma or dot decimal
+                return f"@ EUR {m.group(1).replace(',','.')} /{m.group(2)}"
             line = re.sub(r"(?i)\bEuros?\s*([\d]+[,.][\d]+)\s*/(btl|cs)\b", repl, line)
             line = re.sub(r"(?i)\bEuros?\s+([\d]+)\s*/(btl|cs)\b",
                           lambda m: f"@ EUR {m.group(1)} /{m.group(2)}", line)
             return line
         if not re.search(r"@\s*(EUR|USD)", line):
             line = fix_euro_price(line)
-        # Fix "6/ 50/40" (space after slash) -> "6/50/40"
         line = re.sub(r"(\d+)/\s+(\d+)/\s*(\d+)", r"\1/\2/\3", line)
         line = re.sub(r"(?i)\bPrice\s*:\s*€\s*(\d+(?:[.,]\d+)?)\s*/(btl|cs)\b",r"@ EUR \1 /\2",line)
         line = re.sub(r"(?i)\bPrice\s*:\s*\$\s*(\d+(?:[.,]\d+)?)\s*/(btl|cs)\b",r"@ USD \1 /\2",line)
         line = re.sub(r"(?i)\bPrice\s*:\s*(USD|EUR)\s*(\d+(?:[.,]\d+)?)\s*/(btl|cs)\b",r"@ \1 \2 /\3",line)
-        # Only normalize bare € or $ if no @ already present
         if not re.search(r"@\s*(EUR|USD|€|\$)", line):
             line = re.sub(r"€\s*(\d+(?:[.,]\d+)?)\s*/(btl|cs)\b",r"@ EUR \1 /\2",line)
             line = re.sub(r"\$\s*(\d+(?:[.,]\d+)?)\s*/(btl|cs)\b",r"@ USD \1 /\2",line)
         line = re.sub(r"(?i)\bex-([A-Za-z]+)",r"ex \1",line)
         line = re.sub(r"(?i)\bDuty\s*Status\s*:\s*","",line)
-        # Normalize "at 68 euro" / "at 45.90 euro" -> "@ EUR 68 /cs"
+        # Normalize "at 68 euro" -> "@ EUR 68 /cs"
         line = re.sub(r"(?i)\bat\s+([\d]+(?:[.,][\d]+)?)\s+euros?\b",
                       lambda m: f"@ EUR {m.group(1).replace(',','.')} /cs", line)
-        # Normalize "at USD 68" -> "@ USD 68 /cs"
         line = re.sub(r"(?i)\bat\s+(USD|EUR)\s+([\d]+(?:[.,][\d]+)?)\b",
                       lambda m: f"@ {m.group(1)} {m.group(2).replace(',','.')} /cs", line)
         if not re.search(r"@\s*(EUR|USD)", line):
             line = re.sub(r"(?i)\beuro\s+(\d)",r"@ EUR \1",line)
             line = re.sub(r"(?i)\beuros\s+(\d)",r"@ EUR \1",line)
-        # Fix any remaining "@ EUR 7,49" -> "@ EUR 7.49" (comma decimal after @)
         line = re.sub(r"(@\s*(?:EUR|USD)\s+)(\d+),(\d+)", r"\g<1>\2.\3", line)
         line = re.sub(r"(?i)\b(\d+(?:[.,]\d+)?)\s*(USD|EUR)\s*(?:per case|/cs)?\s*$",r"@ \2 \1 /cs",line)
         line = re.sub(r"(?i)\b(USD|EUR)\s+(\d+(?:[.,]\d+)?)\s+per case\b",r"@ \1 \2 /cs",line)
         line = re.sub(r"(?i)\b(USD|EUR)\s+(\d+(?:[.,]\d+)?)\s*/(cs|btl)\b",r"@ \1 \2 /\3",line)
-        # FTL zonder qty en zonder prijs -> voeg placeholder toe
         if re.match(r"(?i)^FTL\b",line) and not re.search(r"(?i)\d+\s*(cases|case|cs|bottles|bottle|btls)\b",line) and not re.search(r"@",line):
             line = line + " 1 cs FTL_LINE"
         cleaned.append(line)
@@ -628,6 +648,7 @@ def _parse_offer_text_inner(text):
             r"(?i)\bDuty\s*Status\s*:?\s*T[12]\b",
             r"(?i)\bPrice\s*:", r"(?i)\bQty\s*:",
             r"\b\d{1,2}(?:[.,]\d+)?%\b",
+            r"(?i)\bwith\b",  # strip "with" keyword
             r"\(.*?\)",
         ]:
             product = re.sub(p,"",product)
@@ -707,56 +728,138 @@ def to_excel_bytes(df):
 
 col_in, col_out = st.columns([1, 1])
 
-with col_in:
-    st.subheader("📥 Input")
-    tab_text, tab_file = st.tabs(["Tekst plakken", "Bestand uploaden"])
-    with tab_text:
-        pasted = st.text_area("Plak hier de offertetekst (email, WhatsApp, etc.)", height=400, placeholder="Plak de volledige offertetekst hier...")
-        supplier = st.text_input("Leverancier (optioneel)", placeholder="bijv. Diageo / Pernod / ...")
-    with tab_file:
-        uploaded = st.file_uploader("Upload Excel of CSV", type=["xlsx","xls","csv"])
-        supplier_f = st.text_input("Leverancier (optioneel) ", placeholder="bijv. Diageo / Pernod / ...")
+# ---------------------------------------------------------------------------
+# Tab structuur: Offerte Parser | Voorraad Samenvatten
+# ---------------------------------------------------------------------------
+main_tab1, main_tab2 = st.tabs(["📋 Offerte Parser", "📦 Voorraad Samenvatten"])
 
-with col_out:
-    st.subheader("📤 Output")
-    parsed_df = pd.DataFrame()
-    source_label = ""
+with main_tab1:
+    col_in, col_out = st.columns([1, 1])
 
-    if pasted and pasted.strip():
-        parsed_df = parse_offer_text(pasted)
-        source_label = supplier if supplier else "offerte"
-    elif uploaded is not None:
-        if uploaded.name.lower().endswith(".csv"):
-            raw_df = pd.read_csv(uploaded)
+    with col_in:
+        st.subheader("📥 Input")
+        tab_text, tab_file = st.tabs(["Tekst plakken", "Bestand uploaden"])
+        with tab_text:
+            pasted = st.text_area("Plak hier de offertetekst (email, WhatsApp, etc.)", height=400, placeholder="Plak de volledige offertetekst hier...")
+            supplier = st.text_input("Leverancier (optioneel)", placeholder="bijv. Diageo / Pernod / ...")
+        with tab_file:
+            uploaded = st.file_uploader("Upload Excel of CSV", type=["xlsx","xls","csv"])
+            supplier_f = st.text_input("Leverancier (optioneel) ", placeholder="bijv. Diageo / Pernod / ...")
+
+    with col_out:
+        st.subheader("📤 Output")
+        parsed_df = pd.DataFrame()
+        source_label = ""
+
+        if pasted and pasted.strip():
+            parsed_df = parse_offer_text(pasted)
+            source_label = supplier if supplier else "offerte"
+        elif uploaded is not None:
+            if uploaded.name.lower().endswith(".csv"):
+                raw_df = pd.read_csv(uploaded)
+            else:
+                raw_df = pd.read_excel(uploaded)
+            raw_df = raw_df.rename(columns={c: COLUMN_ALIASES.get(clean_text(c), clean_text(c)) for c in raw_df.columns})
+            if len(raw_df.columns) == 1:
+                parsed_df = parse_offer_text("\n".join(raw_df.iloc[:,0].astype(str).tolist()))
+            else:
+                parsed_df = parse_offer_text("\n".join(raw_df.astype(str).apply(" ".join, axis=1).tolist()))
+            source_label = supplier_f if supplier_f else uploaded.name
+
+        if not parsed_df.empty:
+            total = len(parsed_df)
+            ok = int((parsed_df["Review Flag"]=="NO").sum())
+            review = total - ok
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Totaal regels", total)
+            m2.metric("OK", ok)
+            m3.metric("Review nodig", review)
+            display_cols = [c for c in ["Commodity","Product","GBX","Btls Case","Size CL","Cases Available",
+                           "Purchase Price - Bottle","Purchase Price - Case","Currency",
+                           "RF NRF","ST","Incoterms","Leadtime","Remark/BBD","Parse Status"] if c in parsed_df.columns]
+            st.dataframe(parsed_df[display_cols], use_container_width=True, height=380)
+            filename = f"JVH_{source_label.replace(' ','_')}_parsed.xlsx" if source_label else "JVH_parsed.xlsx"
+            st.download_button(label="⬇️ Download Excel", data=to_excel_bytes(parsed_df), file_name=filename,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True, type="primary")
+            if review > 0:
+                with st.expander(f"⚠️ {review} regels hebben review nodig"):
+                    st.dataframe(parsed_df[parsed_df["Review Flag"]=="YES"][["Product","Review Notes"]], use_container_width=True)
         else:
-            raw_df = pd.read_excel(uploaded)
-        raw_df = raw_df.rename(columns={c: COLUMN_ALIASES.get(clean_text(c), clean_text(c)) for c in raw_df.columns})
-        if len(raw_df.columns) == 1:
-            parsed_df = parse_offer_text("\n".join(raw_df.iloc[:,0].astype(str).tolist()))
-        else:
-            parsed_df = parse_offer_text("\n".join(raw_df.astype(str).apply(" ".join, axis=1).tolist()))
-        source_label = supplier_f if supplier_f else uploaded.name
+            st.info("Plak een offerte links of upload een bestand om te beginnen.")
 
-    if not parsed_df.empty:
-        total = len(parsed_df)
-        ok = int((parsed_df["Review Flag"]=="NO").sum())
-        review = total - ok
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Totaal regels", total)
-        m2.metric("OK", ok)
-        m3.metric("Review nodig", review)
-        st.dataframe(
-            parsed_df[["Commodity","Product","GBX","Btls Case","Size CL","Cases Available","Purchase Price - Bottle","Purchase Price - Case","Currency","RF NRF","ST","Incoterms","Leadtime","Remark/BBD","Parse Status"]],
-            use_container_width=True, height=380,
-        )
-        filename = f"JVH_{source_label.replace(' ','_')}_parsed.xlsx" if source_label else "JVH_parsed.xlsx"
-        st.download_button(label="⬇️ Download Excel", data=to_excel_bytes(parsed_df), file_name=filename,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True, type="primary")
-        if review > 0:
-            with st.expander(f"⚠️ {review} regels hebben review nodig"):
-                st.dataframe(parsed_df[parsed_df["Review Flag"]=="YES"][["Product","Review Notes"]], use_container_width=True)
-    else:
-        st.info("Plak een offerte links of upload een bestand om te beginnen.")
+with main_tab2:
+    st.subheader("📦 Voorraad samenvatten")
+    st.caption("Upload een CSV met productnaam en hoeveelheid — unieke producten worden samengevoegd en qty opgeteld.")
+
+    inv_file = st.file_uploader("Upload voorraad CSV", type=["csv","xlsx","xls"], key="inv_upload")
+
+    if inv_file is not None:
+        try:
+            if inv_file.name.lower().endswith(".csv"):
+                # Try different separators
+                try:
+                    inv_df = pd.read_csv(inv_file, sep="\t")
+                    if len(inv_df.columns) < 2:
+                        inv_file.seek(0)
+                        inv_df = pd.read_csv(inv_file)
+                except:
+                    inv_file.seek(0)
+                    inv_df = pd.read_csv(inv_file)
+            else:
+                inv_df = pd.read_excel(inv_file)
+
+            # Clean column names
+            inv_df.columns = [clean_text(c) for c in inv_df.columns]
+
+            # Detect product and quantity columns
+            product_col = None
+            qty_col = None
+            for col in inv_df.columns:
+                col_l = col.lower()
+                if any(k in col_l for k in ["item","product","description","omschrijving","naam","article"]):
+                    product_col = col
+                if any(k in col_l for k in ["qty","quantity","aantal","cases","hoeveelheid"]):
+                    qty_col = col
+
+            # Fallback: first col = product, last numeric = qty
+            if not product_col:
+                product_col = inv_df.columns[0]
+            if not qty_col:
+                numeric_cols = inv_df.select_dtypes(include="number").columns.tolist()
+                qty_col = numeric_cols[-1] if numeric_cols else inv_df.columns[-1]
+
+            st.caption(f"Product kolom: **{product_col}** | Qty kolom: **{qty_col}**")
+
+            # Convert qty to numeric
+            inv_df[qty_col] = pd.to_numeric(inv_df[qty_col], errors="coerce").fillna(0)
+
+            # Group by product, sum qty
+            summary = (
+                inv_df.groupby(product_col, as_index=False)[qty_col]
+                .sum()
+                .rename(columns={product_col: "Product", qty_col: "Quantity"})
+                .sort_values("Quantity", ascending=False)
+                .reset_index(drop=True)
+            )
+
+            st.metric("Unieke producten", len(summary))
+            st.dataframe(summary, use_container_width=True, height=500)
+
+            # Export
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as w:
+                summary.to_excel(w, sheet_name="Voorraad", index=False)
+            buf.seek(0)
+            st.download_button(
+                label="⬇️ Download samenvatting",
+                data=buf.getvalue(),
+                file_name="JVH_voorraad_samenvatting.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                type="primary"
+            )
+        except Exception as e:
+            st.error(f"Kan bestand niet lezen: {e}")
 
 st.markdown("---")
 st.markdown('<p style="text-align:center; color:#555; font-size:0.8rem;">JVH Global B.V. · jvh-global.com</p>', unsafe_allow_html=True)
