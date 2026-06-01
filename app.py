@@ -75,11 +75,877 @@ COMMODITY_MAP = {
 SECTION_TO_COMMODITY = {
     "RUM":"Rum","TEQUILA":"Tequila","VODKA":"Vodka","WHISKY":"Whisky","WHISKEY":"Whisky",
     "GIN":"Gin","COGNAC":"Cognac","CHAMPAGNE":"Champagne","WINE":"Wines","WINE (FCL)":"Wines","WINES":"Wines",
-    "LIQUOR":"Liquor","BEERS":"Beers","SOFTDRINKS":"Softdrinks",
+    "LIQUOR":"Liquor","BEERS":"Beers","SOFTDRINKS":"Softdrinks","RTD":"RTD","SPIRITS":"",
 }
 
 COLUMN_ALIASES = {
     "Lead Time":"Leadtime","Warehouse":"Incoterms","Coded":"ST","Cases Available (MOQ)":"Cases Available","Cases Available":"Cases Available",
+    "RF/NRF":"RF NRF","REF/NRF":"RF NRF","producto":"Product","Producto":"Product",
+    "btl/cs":"Btls Case","Btl/cs":"Btls Case","BTLS/CS":"Btls Case","CL":"Size CL","alc %":"ABV %","ABV%":"ABV %",
+    "Price":"Price per bottle","price":"Price per bottle","cases":"Cases Available","CASES":"Cases Available","BRAND":"Product","SIZE LTR.":"Size LTR",
+    "CAP":"RF NRF","STATUS":"ST","€/BTL":"Price per bottle","EUROS/CASE":"Price per Case","ETA":"Leadtime",
+}
+
+CURRENCY_SYMBOLS = {"€":"EUR","$":"USD","eur":"EUR","usd":"USD","euro":"EUR"}
+
+def clean_text(v):
+    if v is None: return ""
+    t = str(v).replace("\u00a0"," ").replace("–","-").replace("—","-").replace("\u2019","'")
+    return re.sub(r"[ \t]+"," ",t).strip()
+
+def parse_decimal(v):
+    t = clean_text(v).lower()
+    if not t: return None
+    for tok in ["eur","usd","euro","€","$","per bottle","per btl","per case","/btl","/cs"]: t = t.replace(tok,"")
+    t = t.replace(" ","")
+    if not t: return None
+    if t.count(",") == 1 and t.count(".") >= 1: t = t.replace(".","").replace(",",".")
+    elif t.count(",") == 1 and t.count(".") == 0: t = t.replace(",",".")
+    try: return Decimal(t)
+    except InvalidOperation: return None
+
+def format_money(v, currency):
+    # Geeft een float terug zodat Excel het als getal behandelt
+    # De celopmaak in de export zorgt voor de weergave
+    if v is None: return None
+    try:
+        return float(v)
+    except:
+        return None
+
+def detect_currency(*values):
+    joined = " ".join(clean_text(v).lower() for v in values if clean_text(v))
+    for sym, code in CURRENCY_SYMBOLS.items():
+        if sym in joined: return code
+    return ""
+
+def to_int(v):
+    t = clean_text(v)
+    if not t: return None
+    m = re.search(r"\d+", t)
+    return int(m.group()) if m else None
+
+def to_float(v):
+    d = parse_decimal(v)
+    return float(d) if d is not None else None
+
+def infer_commodity(product, size_cl=None):
+    p = clean_text(product).lower()
+    if size_cl == 5 or "mini" in p or re.search(r"\b5\s?cl\b", p): return "Miniatures (5cl)"
+    for key, commodity in COMMODITY_MAP.items():
+        if key in p: return commodity
+    return ""
+
+def standardize_incoterms(v):
+    t = clean_text(v)
+    t = re.sub(r"(?i)\bexw\b","Exworks",t)
+    t = re.sub(r"(?i)\bex\b","Exworks",t)
+    return t
+
+def standardize_leadtime(v):
+    text = clean_text(v).replace("Lead time","").replace("Leadtime","").strip()
+    t = text.lower().strip()
+    if not t: return ""
+    if re.search(r"(?i)\bon\s*floor\b|\bex\s*stock\b|\bin\s*stock\b|\bstock\b|\bready\b", t): return "On floor"
+    # "Third week of May" -> "Week 3 May"
+    ordinals = {"first":"1","second":"2","third":"3","fourth":"4"}
+    m = re.match(r"(?i)^(first|second|third|fourth)\s+week\s+of\s+([a-z]+)$", t)
+    if m: return f"Week {ordinals.get(m.group(1).lower(),'?')} {m.group(2).capitalize()}"
+    m = re.match(r"(?i)^(mid|end|early|begin)\s+([a-z]+)$", t)
+    if m: return m.group(1).capitalize()+" "+m.group(2).capitalize()
+    m = re.match(r"(\d+)\s*-\s*(\d+)\s*days?", t)
+    if m: return f"{m.group(1)}-{m.group(2)} Days"
+    m = re.match(r"(\d+)\s*days?", t)
+    if m: return f"{m.group(1)} Days"
+    m = re.match(r"(\d+)\s*-\s*(\d+)\s*weeks?", t)
+    if m:
+        lo,hi = int(m.group(1)),int(m.group(2)); return f"{lo*5}-{hi*5} Days"
+    m = re.match(r"(\d+)\s*weeks?", t)
+    if m:
+        w = int(m.group(1)); return f"{w*5}-{(w+1)*5} Days"
+    return text
+
+def standardize_rf(v):
+    t = clean_text(v).upper().replace(".","")
+    if not t: return "REF"
+    if t in {"RF","REF","REFILLABLE"}: return "REF"
+    if t in {"NRF","NON-REF","NON REF","NONREF"}: return "NRF"
+    return t
+
+def ensure_jvh_columns(df):
+    for col in JVH_COLUMNS:
+        if col not in df.columns: df[col] = ""
+    return df[JVH_COLUMNS]
+
+def build_output_row(data):
+    row = {col:"" for col in JVH_COLUMNS}
+    row.update(data)
+    row["# btls case"] = row.get("Btls Case","")
+    # Price per bottle / Price per Case leeg laten (verkoopprijs — vult Joep zelf in)
+    row["Price per bottle"] = ""
+    row["Price per Case"] = ""
+    return row
+
+def parse_column_blob(blob):
+    """Parse samengesmolten kolommen-offerte: qty|product|prijs|warehouse|leadtime|status."""
+    from decimal import Decimal as D
+    blob = re.sub(r"(?i)Quantity\s*Product\s*Price\s*Warehouse\s*Lead\s*Time\s*Coded\s*","",blob)
+    blob = re.sub(r"(?i)Description\s*QTY\s*BOTT[A-Z\s]*Lead\s*time\s*","",blob)
+    pattern = re.compile(
+        r"((?:FCL|FTL|\d[\d,]*\s*(?:btls?|cs|cases?)).*?)"
+        r"((?:Euro|\u20ac|\$|USD)\s*[\d]+[,.]?[\d]*\s*/(?:btl|cs))"
+        r"(.*?)"
+        r"(?=(?:FCL|FTL)(?:[A-Za-z]|\s)|(?<!\d)\d[\d,]*\s+(?:btls?|cs|cases?)|\Z)",
+        re.IGNORECASE | re.DOTALL
+    )
+    rows = []
+    for pre, price_raw, post in pattern.findall(blob):
+        pre = pre.strip()
+        # Strip T1/T2 digit prefix left over from previous record
+        # Pattern: single digit 1 or 2 before a large number = T1 or T2 leftover
+        pre = re.sub(r"^[12](?=\d{3,})", "", pre)
+        pre = re.sub(r"^(T[12]|Coded)\s*","",pre,flags=re.I)
+        qty_match = re.match(r"(?i)^(FCL|FTL)\s*(.*)", pre)
+        num_match = re.match(r"(?i)^([\d,]+)\s*(btls?|cs|cases?)\s*(.*)", pre)
+        if qty_match:
+            qty_type, qty, product_raw = "FTL", 0, qty_match.group(2).strip()
+        elif num_match:
+            qty = int(num_match.group(1).replace(",",""))
+            qty_type = "BTLS" if "btl" in num_match.group(2).lower() else "CS"
+            product_raw = num_match.group(3).strip()
+        else:
+            qty_type, qty, product_raw = "FTL", 0, pre
+
+        btls_case = size_cl = abv = None
+        # "6/ 50/40" or "6/70/40" -> btls=6, size=70cl, abv=40%
+        sm = re.search(r"\b(\d+)/\s*(\d+)/\s*(\d+)\b", product_raw)
+        if sm:
+            btls_case = int(sm.group(1))
+            size_cl = int(sm.group(2))
+            abv = float(sm.group(3))
+            product_raw = (product_raw[:sm.start()] + " " + product_raw[sm.end():]).strip()
+
+        # "100cl 40%" or "70cl" alone - size without btls_case
+        if size_cl is None:
+            cm = re.search(r"\b(\d+)cl\b", product_raw, re.I)
+            if cm: size_cl = int(cm.group(1))
+
+        # ABV%
+        if abv is None:
+            am = re.search(r"\b(\d{1,2}(?:[.,]\d+)?)%\b", product_raw)
+            if am: abv = float(am.group(1).replace(",","."))
+
+        gbx = "GBX" if re.search(r"(?i)\b(gbx|ngbx)\b", product_raw) else ""
+        rf_nrf = "NRF" if re.search(r"(?i)\bNRF\b|\bnon.?ref\b", product_raw) else "REF"
+
+        # Clean product name
+        product = re.sub(r"(?i)\b(ref|ngbx|gbx|nrf)\b","",product_raw)
+        product = re.sub(r"\(glass bottle\)","",product,flags=re.I)
+        product = re.sub(r"\b\d{1,2}(?:[.,]\d+)?%","",product)
+        product = re.sub(r"\b\d+cl\b","",product,flags=re.I)  # strip "100cl" from name
+        product = re.sub(r"\b40%\b|\b35%\b","",product)  # strip ABV from name
+        # Strip warehouse/location names that end up in product
+        product = re.sub(r"(?i)\s*/\s*newcorp.*$","",product)
+        product = re.sub(r"(?i)\s*/\s*loendersloot.*$","",product)
+        product = re.sub(r"(?i)\bon\s+the\s+floor\b","",product)
+        product = re.sub(r"(?i)\bthe\s+floor\b","",product)
+        product = re.sub(r"(?i)\b(week\s+of\s+may|third\s+week.*$)","",product)
+        product = re.sub(r"\s+"," ",product).strip(" .,-/")
+
+        # Price
+        pv = re.search(r"[\d]+[,.]?[\d]*", price_raw)
+        price_num = pv.group().replace(",",".") if pv else None
+        currency = "USD" if re.search(r"(?i)\$|USD", price_raw) else "EUR"
+
+        # Post: warehouse, leadtime, status
+        post = re.sub(r"(?i)(?<!\s)(On the floor|On floor|Coded|T[12])", r" \1", post)
+        inc = re.search(r"(?i)\b(DAP\s+[A-Za-z]+(?:\s+[A-Za-z]+)?|Exw(?:orks)?\s+[A-Za-z]+(?:\s+[A-Za-z]+)?|EXW\s+[A-Za-z]+)", post)
+        incoterms = re.sub(r"(?i)\bExw\b","Exworks",inc.group(1)) if inc else ""
+        # Strip leadtime/week info that ended up in incoterms
+        incoterms = re.sub(r"(?i)\s+(third|second|first|fourth|week|of|on|floor|coded).*$","",incoterms).strip()
+        incoterms = re.sub(r"(?i)\s+On$","",incoterms).strip()
+
+        st_m = re.search(r"(?i)\bT[12]\b", post)
+        st = st_m.group(0).upper() if st_m else ""
+
+        lm = re.search(r"(?i)(on\s+(?:the\s+)?floor|\d+\s*-\s*\d+\s*(?:weeks?|days?)|\d+\s*(?:weeks?|days?)|(?:first|second|third|fourth)\s+week\s+of\s+[a-z]+|mid\s+[a-z]+)", post)
+        if lm:
+            lt = lm.group(1).lower().strip()
+            if "floor" in lt:
+                leadtime = "On floor"
+            else:
+                m2 = re.match(r"(\d+)\s*-\s*(\d+)\s*weeks?", lt)
+                if m2:
+                    leadtime = f"{int(m2.group(1))*5}-{int(m2.group(2))*5} Days"
+                else:
+                    m2 = re.match(r"(\d+)\s*weeks?", lt)
+                    if m2:
+                        w = int(m2.group(1)); leadtime = f"{w*5}-{(w+1)*5} Days"
+                    else:
+                        m2 = re.match(r"(\d+)\s*-\s*(\d+)\s*days?", lt)
+                        if m2:
+                            leadtime = f"{m2.group(1)}-{m2.group(2)} Days"
+                        elif re.match(r"(?i)(first|second|third|fourth)\s+week", lt):
+                            ord_map = {"first":"1","second":"2","third":"3","fourth":"4"}
+                            pts = lt.split(); leadtime = f"Week {ord_map.get(pts[0],'?')} {pts[-1].capitalize()}"
+                        else:
+                            leadtime = lm.group(1)
+        else: leadtime = ""
+
+        cases_moq = "FTL" if qty_type == "FTL" else (qty // btls_case if qty_type == "BTLS" and btls_case else qty)
+        price_d = D(price_num) if price_num else None
+        btl_price = float(price_d) if price_d else None
+        case_price = float(price_d * D(str(btls_case))) if price_d and btls_case else None
+        remark = "CODED" if re.search(r"(?i)\bcoded\b", post) else ""
+        infer = infer_commodity(product, size_cl)
+
+        missing = [x for x in [
+            "Missing Btls Case" if not btls_case else "",
+            "Missing Size CL" if not size_cl else "",
+            "Missing ABV % (handmatig invullen)" if not abv else "",
+            "Missing Incoterms" if not incoterms else "",
+            "Missing Leadtime" if not leadtime else "",
+        ] if x]
+
+        rows.append(build_output_row({
+            "Commodity": infer, "Product": product, "GBX": gbx,
+            "Btls Case": btls_case, "Size CL": size_cl, "ABV %": abv,
+            "RF NRF": rf_nrf, "ST": st, "Cases Available": cases_moq,
+            "Purchase Price - Bottle": btl_price, "Purchase Price - Case": case_price,
+            "Currency": currency, "Incoterms": incoterms, "Leadtime": leadtime,
+            "Remark/BBD": remark, "Source Row": "blob",
+            "Parse Status": "REVIEW" if missing else "OK",
+            "Review Flag": "YES" if missing else "NO",
+            "Review Notes": "; ".join(missing),
+        }))
+    return ensure_jvh_columns(pd.DataFrame(rows)) if rows else pd.DataFrame()
+
+
+def detect_and_split_blob(text):
+    """Detecteer blob-offerte en splits naar losse regels voor de normale parser."""
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    def is_blob(l):
+        has_price = l.count("\u20ac") >= 2 or len(re.findall(r"(?i)\beuro\b", l)) >= 2
+        return len(l) > 150 and has_price
+    blob_lines = [l for l in lines if is_blob(l)]
+    if not blob_lines: return text
+    result_lines = [l for l in lines if l not in blob_lines]
+    for blob in blob_lines:
+        blob = re.sub(r"(?i)Description\s*QTY\s*BOTT[A-Z\s]*Lead\s*time\s*","",blob)
+        blob = re.sub(r"(T[12]|Coded)(FCL|FTL)", r"\1\n\2", blob, flags=re.I)
+        blob = re.sub(r"(T[12]|Coded)(\d+\s+(?:btls?|cs|cases?))", r"\1\n\2", blob, flags=re.I)
+        blob = re.sub(r"(?i)(floor)(FCL|FTL)", r"\1\n\2", blob)
+        blob = re.sub(r"(?i)(floor)(\d+\s+(?:btls?|cs|cases?))", r"\1\n\2", blob)
+        for part in blob.splitlines():
+            part = part.strip()
+            if not part or len(part) < 8: continue
+            part = re.sub(r"(?i)^(FCL|FTL)([A-Za-z])", r"\1 \2", part)
+            part = re.sub(r"(?i)^FCL\b","FTL",part)
+            for kw in ["DAP ","Exw ","Exworks ","CFR ","On the floor","On floor","Coded","T1 ","T2 "]:
+                part = re.sub(rf"(?<!\s)({re.escape(kw.strip())})", r" \1", part)
+            part = re.sub(r"\b(\d+)/(\d+)/(\d+)\b", lambda m: f"{m.group(1)}x{m.group(2)}cl {m.group(3)}%", part)
+            part = re.sub(r"\(glass bottle\)","",part,flags=re.I)
+            part = re.sub(r"(\d+(?:\.\d+)?)[Ll]\s*[xX]\s*(\d+)", lambda m: f"{m.group(2)}x{m.group(1)}L", part)
+            part = re.sub(r"(?i)\bON THE FLOOR\s*LOEND\.?","On floor Exworks Loendersloot",part)
+            part = re.sub(r"(?i)\bON THE FLOOR\b","On floor",part)
+            part = re.sub(r"(?i)\bExw\b","Exworks",part)
+            part = re.sub(r"(?i)\bEuros?\s*([\d]+[,.]?[\d]*)\s*/(btl|cs)\b",
+                          lambda m: f"@ EUR {m.group(1).replace(',','.')} /{m.group(2)}", part)
+            part = re.sub(r"\u20ac\s*([\d,]+(?:\.\d+)?)", lambda m: f"@ EUR {m.group(1).replace(',','.')} /btl", part)
+            result_lines.append(part)
+    return "\n".join(result_lines)
+
+
+def preprocess_text(text):
+    cleaned = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line: cleaned.append(""); continue
+        line = re.sub(r"^[-*•]\s*","",line)
+        line = re.sub(r"(?<=\d),(?=\d{3}\b)","",line)
+        line = line.replace("–","-").replace("—","-")
+        # Fix "17, 60" (spatie na komma in decimaal) -> "17,60" — MOET EERSTE zijn
+        line = re.sub(r"\b(\d+),\s+(\d{2})\b", r"\1,\2", line)
+        line = re.sub(r"(?i)^FCL\b","FTL",line)
+        # Normalize "Full load" -> "FTL"
+        line = re.sub(r"(?i)^Full\s+load\b","FTL",line)
+        line = re.sub(r"(?i)\bfull\s+load\s*:\s*","FTL ",line)
+        line = re.sub(r"(?i)\bfull\s+load\b","FTL",line)
+        # Normalize "Loen/Riga" -> "Loendersloot"
+        line = re.sub(r"(?i)\bLoen/Riga\b","Loendersloot",line)
+        line = re.sub(r"(?i)\b(?<![A-Za-z])Loen\b","Loendersloot",line)
+        # Normalize "crt" -> "cs" (carton = case)
+        line = re.sub(r"(?i)\bcrt\b","cs",line)
+        # Fix "crt/cs BEFORE number" -> "number cs"
+        line = re.sub(r"(?i)(?<![0-9])\bcs\s+(\d+)\b", r"\1 cs", line)
+        # Split merged product lines: "4 weeksJim Beam" -> two lines
+        line = re.sub(r"(?i)(weeks?|days?)\s*([A-Z][a-z])", r"\1\n\2", line)
+        def normalize_liter_size(m):
+            try:
+                liters = float(m.group(1).replace(',','.'))
+                cl = int(round(liters * 100))
+                return f"{m.group(2)}x{cl}cl"
+            except:
+                return m.group(0)
+        line = re.sub(r"(?i)\b(\d+[.,]\d+)\s*l\s*[xX]\s*(\d+)", normalize_liter_size, line)
+        line = re.sub(r"(?i)\b(\d+)\s*l\s*[xX]\s*(\d+)", lambda m: f"{m.group(2)}x{m.group(1)}L", line)
+        # Normalize "07 x 6" (shorthand 0.7L) -> "6x70cl", "05 x 12" -> "12x50cl"
+        line = re.sub(r"(?i)\b07\s*[xX]\s*(\d+)\b(?!\s*cl)", lambda m: f"{m.group(1)}x70cl", line)
+        line = re.sub(r"(?i)\b05\s*[xX]\s*(\d+)\b(?!\s*cl)", lambda m: f"{m.group(1)}x50cl", line)
+        # Normalize "Price: N[,N] Euro/crt" or "Price: N Euro" -> "@ EUR N /cs"
+        line = re.sub(r"(?i)\bPrice\s*:\s*([\d]+[.,][\d]+)\s*E(?:uro)?(?:/(?:cs|crt|case))?\b",
+                      lambda m: f"@ EUR {m.group(1).replace(',','.')} /cs", line)
+        line = re.sub(r"(?i)\bPrice\s*:\s*([\d]+)\s*E(?:uro)?(?:/(?:cs|crt|case))?\b",
+                      lambda m: f"@ EUR {m.group(1)} /cs", line)
+        # Normalize bare "N Euro/crt" or "N,N Euro/crt" -> "@ EUR N /cs"
+        if not re.search(r"@", line):
+            line = re.sub(r"(?i)\b([\d]+[.,][\d]+)\s*E(?:uro)?/(?:cs|crt|case)\b",
+                          lambda m: f"@ EUR {m.group(1).replace(',','.')} /cs", line)
+            line = re.sub(r"(?i)\b([\d]+)\s*E(?:uro)?/(?:cs|crt|case)\b",
+                          lambda m: f"@ EUR {m.group(1)} /cs", line)
+        # Split merged product lines: "...Lead time: 4 weeksJim Beam..." -> two lines
+        line = re.sub(r"(?i)(weeks?|days?|floor|deposit\s*payment)\s*([A-Z][a-z])", r"\1\n\2", line)
+        line = re.sub(r"\b(\d+),\s+(\d{2})\b", r"\1,\2", line)
+        # Fix "Price: N, NN" specifically
+        line = re.sub(r"(?i)(Price\s*:\s*\d+),\s+(\d+)", r"\1,\2", line)
+        # Fix "crt 900" / "cs 900" (qty after unit word) -> "900 cs"
+        line = re.sub(r"(?i)\b(crt|cs)\s+(\d+)\b(?!\s*/)", r"\2 cs", line)
+        # Fix common typos in location names
+        line = re.sub(r"(?i)\bLoednersloot\b","Loendersloot",line)
+        line = re.sub(r"(?i)\bLoandersloot\b","Loendersloot",line)
+        # Normalize "Price: N,NN" without Euro suffix -> "@ EUR N.NN /cs"
+        if not re.search(r"@", line):
+            line = re.sub(r"(?i)\bPrice\s*:\s*([\d]+[.,][\d]+)\b(?!\s*(?:Euro|EUR|USD|\$|€))",
+                          lambda m: f"@ EUR {m.group(1).replace(',','.')} /cs", line)
+            line = re.sub(r"(?i)\bPrice\s*:\s*([\d]+)\b(?!\s*(?:Euro|EUR|USD|\$|€|[.,]\d))",
+                          lambda m: f"@ EUR {m.group(1)} /cs", line)
+        # Fix double @@
+        line = re.sub(r"@\s*@", "@", line)
+        # "lead time:" -> strip label
+        line = re.sub(r"(?i)\blead\s*time\s*:","",line)
+        # "in stock" -> "On floor"
+        line = re.sub(r"(?i)\bin\s+stock\b","On floor",line)
+        # "in Loendersloot" / "to Loendersloot" -> "Exworks Loendersloot"
+        line = re.sub(r"(?i)\b(?:in|to)\s+Loendersloot\b","Exworks Loendersloot",line)
+        line = re.sub(r"(?i)\bin\s+Holland\b","Exworks Loendersloot",line)
+        # Strip "10% deposit" noise
+        line = re.sub(r"(?i)\b\d+%\s*deposit\w*","",line)
+        # Strip WhatsApp/Telegram timestamps
+        line = re.sub(r"^\[[\d\-]+,\s*[\d:]+\]\s*[^:]+:\s*","",line)
+        # Strip "(T2 status)" -> keep T2 as standalone BEFORE stripping trailing noise
+        line = re.sub(r"\((T[12])\s+status\)", r" \1 ", line, flags=re.I)
+        # Strip parenthetical case price "(23,40€ per case)" before other processing
+        line = re.sub(r"\([^)]*€[^)]*(?:per\s+case|per\s+cs)[^)]*\)","",line,flags=re.I)
+        # Strip trailing noise but PRESERVE T1/T2 at end
+        line = re.sub(r"(?i)\s+after\s+deposit\s+confirmation\s+from\s+\w+","",line)
+        line = re.sub(r"(?i)\s+lead\s+time\b","",line)
+        # Normalize "with N,NN€ per bottle" -> "@ EUR N.NN /btl"  (BEFORE global replacements)
+        line = re.sub(r"(?i)\bwith\s+([\d]+[.,][\d]+)€\s*per\s*bottle",
+                      lambda m: f"@ EUR {m.group(1).replace(',','.')} /btl", line)
+        line = re.sub(r"(?i)\bwith\s+([\d]+)€\s*per\s*bottle",
+                      lambda m: f"@ EUR {m.group(1)} /btl", line)
+        line = re.sub(r"([\d]+[.,][\d]+)€\s*per\s*bottle",
+                      lambda m: f"@ EUR {m.group(1).replace(',','.')} /btl", line, flags=re.I)
+        line = re.sub(r"([\d]+)€\s*per\s*bottle",
+                      lambda m: f"@ EUR {m.group(1)} /btl", line, flags=re.I)
+        # Case price fallback if no bottle price
+        line = re.sub(r"(?i)\bwith\s+([\d]+[.,][\d]+)€\s*per\s*case",
+                      lambda m: f"@ EUR {m.group(1).replace(',','.')} /cs", line)
+        line = re.sub(r"([\d]+[.,][\d]+)€\s*per\s*case",
+                      lambda m: f"@ EUR {m.group(1).replace(',','.')} /cs", line, flags=re.I)
+        # Strip remaining "with" before leadtime/incoterms
+        line = re.sub(r"(?i)\bwith\s+(\d+-\d+\s*days?)", r"\1", line)
+        line = re.sub(r"(?i)\bwith\b","",line)
+        # Fix double @@
+        line = re.sub(r"@\s*@","@",line)
+        # Global simple replacements (AFTER per bottle/case specific handling)
+        for old, new in {"RF.":"RF","/cs.":"/cs","/btl.":"/btl"," per bottle":" /btl"," per case":" /cs"," per cs":" /cs"," per btl":" /btl"}.items():
+            line = line.replace(old, new)
+        line = re.sub(r"\b(\d+)/(\d+)/(\d+)\b", lambda m: f"{m.group(1)}x{m.group(2)}cl {m.group(3)}%", line)
+        line = re.sub(r"\(glass bottle\)","",line,flags=re.I)
+        line = re.sub(r"\((\d+(?:\.\d+)?)[Ll]\s*[xX]\s*(\d+)\)", lambda m: f"{m.group(2)}x{m.group(1)}L", line)
+        line = re.sub(r"\((\d+)[Cc][Ll]\s*[xX]\s*(\d+)\)", lambda m: f"{m.group(2)}x{m.group(1)}cl", line)
+        line = re.sub(r"(?i)\bQty\s*:\s*","",line)
+        def fix_euro_price(line):
+            def repl(m):
+                return f"@ EUR {m.group(1).replace(',','.')} /{m.group(2)}"
+            line = re.sub(r"(?i)\bEuros?\s*([\d]+[,.][\d]+)\s*/(btl|cs)\b", repl, line)
+            line = re.sub(r"(?i)\bEuros?\s+([\d]+)\s*/(btl|cs)\b",
+                          lambda m: f"@ EUR {m.group(1)} /{m.group(2)}", line)
+            return line
+        if not re.search(r"@\s*(EUR|USD)", line):
+            line = fix_euro_price(line)
+        line = re.sub(r"(\d+)/\s+(\d+)/\s*(\d+)", r"\1/\2/\3", line)
+        line = re.sub(r"(?i)\bPrice\s*:\s*€\s*(\d+(?:[.,]\d+)?)\s*/(btl|cs)\b",r"@ EUR \1 /\2",line)
+        line = re.sub(r"(?i)\bPrice\s*:\s*\$\s*(\d+(?:[.,]\d+)?)\s*/(btl|cs)\b",r"@ USD \1 /\2",line)
+        line = re.sub(r"(?i)\bPrice\s*:\s*(USD|EUR)\s*(\d+(?:[.,]\d+)?)\s*/(btl|cs)\b",r"@ \1 \2 /\3",line)
+        if not re.search(r"@\s*(EUR|USD|€|\$)", line):
+            line = re.sub(r"€\s*(\d+(?:[.,]\d+)?)\s*/(btl|cs)\b",r"@ EUR \1 /\2",line)
+            line = re.sub(r"\$\s*(\d+(?:[.,]\d+)?)\s*/(btl|cs)\b",r"@ USD \1 /\2",line)
+        line = re.sub(r"(?i)\bex-([A-Za-z]+)",r"ex \1",line)
+        line = re.sub(r"(?i)\bDuty\s*Status\s*:\s*","",line)
+        # Normalize "at 68 euro/euros" -> "@ EUR 68 /cs"
+        line = re.sub(r"(?i)\bat\s+([\d]+(?:[.,][\d]+)?)\s+euros?\b",
+                      lambda m: f"@ EUR {m.group(1).replace(',','.')} /cs", line)
+        # Normalize "at 116 USD" -> "@ USD 116 /cs"
+        line = re.sub(r"(?i)\bat\s+([\d]+(?:[.,][\d]+)?)\s+USD\b",
+                      lambda m: f"@ USD {m.group(1).replace(',','.')} /cs", line)
+        # Normalize "at USD/EUR N" -> "@ USD/EUR N /cs"
+        line = re.sub(r"(?i)\bat\s+(USD|EUR)\s+([\d]+(?:[.,][\d]+)?)\b",
+                      lambda m: f"@ {m.group(1)} {m.group(2).replace(',','.')} /cs", line)
+        # Normalize "at N,NN" (no currency, bare number) -> "@ EUR N.NN /cs" (assume EUR)
+        line = re.sub(r"(?i)\bat\s+([\d]+[.,][\d]+)(?!\s*(?:USD|EUR|euro|per))\b",
+                      lambda m: f"@ EUR {m.group(1).replace(',','.')} /cs", line)
+        line = re.sub(r"(?i)\bat\s+([\d]+)(?!\s*(?:USD|EUR|euro|per|\.))\b",
+                      lambda m: f"@ EUR {m.group(1)} /cs", line)
+        if not re.search(r"@\s*(EUR|USD)", line):
+            line = re.sub(r"(?i)\beuro\s+(\d)",r"@ EUR \1",line)
+            line = re.sub(r"(?i)\beuros\s+(\d)",r"@ EUR \1",line)
+        line = re.sub(r"(@\s*(?:EUR|USD)\s+)(\d+),(\d+)", r"\g<1>\2.\3", line)
+        line = re.sub(r"(?i)\b(\d+(?:[.,]\d+)?)\s*(USD|EUR)\s*(?:per case|/cs)?\s*$",r"@ \2 \1 /cs",line)
+        line = re.sub(r"(?i)\b(USD|EUR)\s+(\d+(?:[.,]\d+)?)\s+per case\b",r"@ \1 \2 /cs",line)
+        line = re.sub(r"(?i)\b(USD|EUR)\s+(\d+(?:[.,]\d+)?)\s*/(cs|btl)\b",r"@ \1 \2 /\3",line)
+        if re.match(r"(?i)^FTL\b",line) and not re.search(r"(?i)\d+\s*(cases|case|cs|bottles|bottle|btls)\b",line) and not re.search(r"@",line):
+            line = line + " 1 cs FTL_LINE"
+        cleaned.append(line)
+    return "\n".join(cleaned)
+
+def parse_vertical_offer(text):
+    """Parse vertikale tabel-offerte: elke waarde op eigen regel (DESCRIPTION/BTL/ML/ABV/...)."""
+    from decimal import Decimal as D
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    # Skip header block
+    header_markers = {"DESCRIPTION","BTL/CTN","ML/BTL","ABV","BOTTLE","VARIANT",
+                      "EU STATUS","CARTON","EURO EXW LOENDERSLOOT","EURO EXW",
+                      "PRICE BTL","PRICE CARTON","PRICE/BTL","PRICE/CARTON"}
+    header_end = 0
+    for i, line in enumerate(lines):
+        if any(line.upper().startswith(h) for h in header_markers):
+            header_end = i + 1
+        elif header_end > 0:
+            break
+    data_lines = lines[header_end:]
+    # Detect incoterms from header area
+    incoterms = ""
+    for line in lines[:header_end]:
+        inc = re.search(r"(?i)\b(EXW?\s+[A-Za-z]+(?:\s+[A-Za-z]+)?|DAP\s+[A-Za-z]+)", line)
+        if inc:
+            incoterms = re.sub(r"(?i)\bExw\b","Exworks",inc.group(1))
+            break
+    if not incoterms: incoterms = "Exworks Loendersloot"
+    # Fix kapitalisatie
+    incoterms = re.sub(r"\bLOENDERSLOOT\b","Loendersloot",incoterms)
+    incoterms = re.sub(r"\bRIGA\b","Riga",incoterms)
+    incoterms = re.sub(r"\bSINGAPORE\b","Singapore",incoterms)
+    # Each record = 9 fields: name, btls, ml, abv, rf_nrf, variant, st, price_carton, price_bottle
+    FIELDS = 9
+    rows = []
+    i = 0
+    while i < len(data_lines):
+        line = data_lines[i]
+        is_product = (
+            not re.match(r"^[\d€$.,]+", line) and
+            not re.match(r"^(T[12]|REF|NRF|NGB|GBX|GB)\s*$", line, re.I)
+        )
+        if is_product and i + FIELDS - 1 < len(data_lines):
+            rec = data_lines[i:i+FIELDS]
+            name, btls_s, ml_s, abv_s, rf_s, variant_s, st_s, price_ctn_s, price_btl_s = rec
+            btls_case = int(btls_s) if re.match(r"^\d+$", btls_s) else None
+            ml = int(float(ml_s)) if re.match(r"^[\d.]+$", ml_s) else None
+            size_cl = ml // 10 if ml else None
+            abv = float(abv_s.replace(",",".")) if re.match(r"^[\d.,]+$", abv_s) else None
+            rf_nrf = "NRF" if "NRF" in rf_s.upper() else "REF"
+            gbx = "GBX" if re.search(r"(?i)\bGBX\b", variant_s) else ""
+            st = st_s.upper() if re.match(r"^T[12]$", st_s, re.I) else ""
+            def parse_price(s):
+                m = re.search(r"[\d]+[.,][\d]+|[\d]+", s.replace(" ",""))
+                return m.group().replace(",",".") if m else None
+            p_ctn = parse_price(price_ctn_s)
+            p_btl = parse_price(price_btl_s)
+            currency = "USD" if "$" in price_btl_s else "EUR"
+            ctn_d = D(p_ctn) if p_ctn else None
+            btl_d = D(p_btl) if p_btl else None
+            # Cross-check: if both present, verify consistency
+            if ctn_d and btl_d and btls_case:
+                expected_ctn = btl_d * btls_case
+                if abs(ctn_d - expected_ctn) > D("0.10"):
+                    pass  # accept as-is, prices per bottle and carton may differ
+            product = re.sub(r"\s+"," ", name).strip()
+            commodity = infer_commodity(product, size_cl)
+            missing = [x for x in [
+                "Missing Btls Case" if not btls_case else "",
+                "Missing Size CL" if not size_cl else "",
+                "Missing ABV % (handmatig invullen)" if not abv else "",
+            ] if x]
+            rows.append(build_output_row({
+                "Commodity": commodity, "Product": product, "GBX": gbx,
+                "Btls Case": btls_case, "Size CL": size_cl, "ABV %": abv,
+                "RF NRF": rf_nrf, "ST": st, "Cases Available": "",
+                "Purchase Price - Bottle": float(btl_d) if btl_d else None,
+                "Purchase Price - Case": float(ctn_d) if ctn_d else None,
+                "Currency": currency, "Incoterms": incoterms, "Leadtime": "",
+                "Remark/BBD": "", "Source Row": str(i + header_end + 1),
+                "Parse Status": "REVIEW" if missing else "OK",
+                "Review Flag": "YES" if missing else "NO",
+                "Review Notes": "; ".join(missing),
+            }))
+            i += FIELDS
+        else:
+            i += 1
+    return ensure_jvh_columns(pd.DataFrame(rows)) if rows else pd.DataFrame()
+
+def is_vertical_offer(text):
+    """Detecteer of tekst een verticale tabel-offerte is."""
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    markers = sum(1 for l in lines[:15] if l.upper() in
+                  {"DESCRIPTION","BTL/CTN","ML/BTL","ABV","EU STATUS","VARIANT"})
+    return markers >= 3
+
+def parse_offer_text(text):
+    # Detecteer verticale tabel-offerte
+    if is_vertical_offer(text):
+        return parse_vertical_offer(text)
+    # Detecteer kolommen-blob (Euro-prijs formaat zonder spaties)
+    lines_raw = [l.strip() for l in text.splitlines() if l.strip()]
+    def is_col_blob(l):
+        has_euro = len(re.findall(r"(?i)\beuro\b", l)) >= 2
+        return len(l) > 150 and has_euro
+    col_blobs = [l for l in lines_raw if is_col_blob(l)]
+    if col_blobs:
+        all_rows = []
+        for blob in col_blobs:
+            df_blob = parse_column_blob(blob)
+            if not df_blob.empty:
+                all_rows.append(df_blob)
+        non_blob = [l for l in lines_raw if not is_col_blob(l)]
+        if non_blob:
+            df_rest = _parse_offer_text_inner("\n".join(non_blob))
+            if not df_rest.empty:
+                all_rows.append(df_rest)
+        if all_rows:
+            return ensure_jvh_columns(pd.concat(all_rows, ignore_index=True))
+        return pd.DataFrame()
+    return _parse_offer_text_inner(text)
+
+def _parse_offer_text_inner(text):
+    text = detect_and_split_blob(text)
+    text = preprocess_text(text)
+    rows = []
+    current_section = ""
+    default_coded = False
+    trailing_bbd = ""
+    trailing_moq = None
+    global_incoterms = ""
+    global_leadtime = ""
+
+    for raw in text.splitlines():
+        line = clean_text(raw)
+        if not line: continue
+        if not re.search(r"(?i)@|\d+\s*(cs|cases|btls)\b", line):
+            inc = re.search(r"(?i)\b(EX(?:W| |\s)\s*[A-Za-z]+(?:\s+[A-Za-z]+)?|DAP\s+[A-Za-z]+(?:\s+[A-Za-z]+)?)\b", line)
+            if inc and not global_incoterms: global_incoterms = standardize_incoterms(inc.group(1))
+            lead = re.search(r"(?i)(on\s*floor|stock|ready|\d+\s*-\s*\d+\s*(?:weeks?|days?)|\d+\s*(?:weeks?|days?))", line)
+            if lead and not global_leadtime: global_leadtime = standardize_leadtime(lead.group(1))
+
+    for line_number, raw_line in enumerate(text.splitlines(), start=1):
+        line = clean_text(raw_line)
+        if not line: continue
+        upper = line.upper()
+        if upper.rstrip(":") in SECTION_TO_COMMODITY:
+            current_section = SECTION_TO_COMMODITY[upper.rstrip(":")]; continue
+        if upper.startswith("BBD:") or "MOQ:" in upper:
+            m = re.search(r"(?i)bbd:\s*([^-]+(?:[-/][^-]+)?)", line)
+            if m: trailing_bbd = clean_text(m.group(1))
+            m = re.search(r"(?i)moq:\s*([\d,]+)\s*cs", line)
+            if m: trailing_moq = int(m.group(1).replace(",",""))
+            continue
+        if "CODED" in upper and "ALL ITEMS" in upper:
+            default_coded = True; continue
+
+        is_ftl = bool(re.search(r"(?i)\bFTL\b", line)) or "FTL_LINE" in line
+        qty_match = re.search(r"(?i)([\d,]+)\s*(cases|case|cs|bottles|bottle|btls)\b", line)
+        if not qty_match and not is_ftl: continue
+        if qty_match:
+            qty_raw = qty_match.group(1).replace(",","").strip()
+            if not qty_raw or qty_raw == "FTL":
+                qty = 0
+            else:
+                try: qty = int(qty_raw)
+                except: qty = 0
+            qty_unit = "BTLS" if qty_match.group(2).lower() in {"bottles","bottle","btls"} else "CS"
+        else:
+            qty = 0; qty_unit = "CS"
+
+        price_match = re.search(r"(?i)@\s*(EUR|USD|€|\$)?\s*([0-9]+(?:[.,][0-9]+)?)\s*(?:/(btl|cs)|per\s+(bottle|case))?", line)
+        if not price_match: continue
+        curr_token = clean_text(price_match.group(1)).lower()
+        currency = "USD" if curr_token in {"usd","$"} else "EUR" if curr_token in {"eur","€","euro","euros"} else ""
+        raw_price = parse_decimal(price_match.group(2))
+        price_type = (price_match.group(3) or price_match.group(4) or "").lower()
+
+        btls_case = None; size_cl = None
+        m = re.search(r"(?i)(\d+)x(\d+(?:\.\d+)?)l\b", line)
+        if m:
+            btls_case = int(m.group(1)); size_cl = int(Decimal(m.group(2)) * Decimal("100"))
+        else:
+            m = re.search(r"(?i)(\d+)x(\d+(?:\.\d+)?)ml\b", line)
+            if m:
+                btls_case = int(m.group(1)); size_cl = int(Decimal(m.group(2)) / Decimal("10"))
+            else:
+                m = re.search(r"(?i)(\d+)x(\d+)cl\b", line)
+                if m:
+                    btls_case = int(m.group(1)); size_cl = int(m.group(2))
+
+        abv_match = re.search(r"(?i)\b(\d{1,2}(?:[.,]\d+)?)%\b", line)
+        abv = float(abv_match.group(1).replace(",",".")) if abv_match else None
+        rf_nrf = "NRF" if re.search(r"(?i)\bNRF\b|\bnon.?ref\b", line) else "REF"
+        st_match = re.search(r"(?i)\bT[12]\b", line)
+        st_status = st_match.group(0).upper() if st_match else ""
+
+        parts_pipe = [clean_text(p) for p in line.split("|")]
+        incoterms = standardize_incoterms(parts_pipe[-2]) if len(parts_pipe) >= 3 else ""
+        leadtime = standardize_leadtime(parts_pipe[-1]) if len(parts_pipe) >= 2 else ""
+        if not incoterms:
+            inc_match = re.search(r"(?i)\b(EX(?:W| |\s)\s*[A-Za-z]+(?:\s+[A-Za-z]+)?|DAP\s+[A-Za-z]+(?:\s+[A-Za-z]+)?|CFR\s+[A-Za-z]+|CNF\s+[A-Za-z]+)\b", line)
+            if inc_match: incoterms = standardize_incoterms(inc_match.group(1))
+        if not incoterms and global_incoterms: incoterms = global_incoterms
+        if not leadtime:
+            lead_match = re.search(r"(?i)(on\s*floor|stock|ready|\d+\s*-\s*\d+\s*(?:weeks?|days?)|\d+\s*(?:weeks?|days?)|mid\s+[a-z]+|end\s+[a-z]+|early\s+[a-z]+|(?:first|second|third|fourth)\s+week\s+of\s+[a-z]+)", line)
+            if lead_match: leadtime = standardize_leadtime(lead_match.group(1))
+        if not leadtime and global_leadtime: leadtime = global_leadtime
+
+        product = line
+        for p in [
+            r"(?i)\bFTL\b", r"\bFTL_LINE\b", r"\b1\s+cs\b",
+            r"(?i)\b[\d,]+\s*(cases|case|cs|bottles|bottle|btls)\b",
+            r"(?i)@\s*(EUR|USD|€|\$)?\s*[0-9]+(?:[.,][0-9]+)?\s*(?:/(?:btl|cs)|per\s+(?:bottle|case))?",
+            r"(?i)\b(EX(?:W| |\s)\s*[A-Za-z]+(?:\s+[A-Za-z]+)?|DAP\s+[A-Za-z]+(?:\s+[A-Za-z]+)?|CFR\s+[A-Za-z]+|CNF\s+[A-Za-z]+)\b",
+            r"(?i)\b(on\s*floor|stock|ready|\d+\s*-\s*\d+\s*(?:weeks?|days?)|\d+\s*(?:weeks?|days?)|mid\s+[a-z]+|(?:first|second|third|fourth)\s+week\s+of\s+[a-z]+)\b",
+            r"(?i)\bNRF\b|\bREF\b|\bRF\b|\bT1\b|\bT2\b|\(coded\)|coded",
+            r"(?i)\b\d+x\d+(?:\.\d+)?l\b|\b\d+x\d+cl\b|\b\d+x\d+ml\b",
+            r"(?i)\bDuty\s*Status\s*:?\s*T[12]\b",
+            r"(?i)\bPrice\s*:", r"(?i)\bQty\s*:",
+            r"\b\d{1,2}(?:[.,]\d+)?%\b",
+            r"(?i)\bwith\b",  # strip "with" keyword
+            r"(?i)\bthe\s+floor\b",  # strip "the floor" from product name
+            r"(?i)\bcoming\b",  # strip "coming"
+            r"(?i)\bnext\s+week\b",  # strip "next week"
+            r"(?i)\b/btl\b|\b/cs\b",  # strip unit remnants
+            r"(?i)\s*/\s*(?:Riga|Loen|Loendersloot|Singapore)\b",  # strip location after /
+            r"\(.*?\)",
+        ]:
+            product = re.sub(p,"",product)
+        product = product.replace("|"," ").replace("--"," ")
+        product = re.sub(r"(?i)\+?\s*gb\b"," GBX",product)
+        gbx = "GBX" if re.search(r"(?i)\bgbx\b|\bcradle\b|\bgb\b", product) else ""
+        product = re.sub(r"(?i)\bgbx\b|\bcradle\b","",product)
+        product = re.sub(r"[@,]"," ",product)
+        product = re.sub(r"\s+-\s*$|\s*-\s+"," ",product)
+        product = re.sub(r"\s+"," ",product).strip(" .,-@")
+        commodity = current_section or infer_commodity(product, size_cl)
+
+        bottle_price = case_price = None
+        if price_type in {"bottle","btl"}:
+            bottle_price = raw_price
+            if raw_price is not None and btls_case: case_price = raw_price * Decimal(str(btls_case))
+        else:
+            case_price = raw_price
+            if raw_price is not None and btls_case: bottle_price = raw_price / Decimal(str(btls_case))
+
+        cases_moq = "FTL" if (is_ftl and qty == 0) else qty
+        review_notes = []
+        if qty_unit == "BTLS" and qty > 0:
+            review_notes.append("Hoeveelheid in flessen — omgerekend naar dozen")
+            if btls_case: cases_moq = qty // btls_case
+        if not commodity: review_notes.append("Missing commodity")
+        if btls_case is None: review_notes.append("Missing Btls Case")
+        if size_cl is None: review_notes.append("Missing Size CL")
+        if abv is None: review_notes.append("Missing ABV % (handmatig invullen)")
+        if not currency: review_notes.append("Missing currency — controleer offerte")
+        if not leadtime: review_notes.append("Missing Leadtime")
+        if not incoterms: review_notes.append("Missing Incoterms")
+
+        remark_parts = []
+        if default_coded or "coded" in line.lower(): remark_parts.append("CODED")
+        if trailing_bbd: remark_parts.append(f"BBD: {trailing_bbd}")
+        if trailing_moq: remark_parts.append(f"MOQ: {trailing_moq} cs")
+
+        rows.append(build_output_row({
+            "Commodity":commodity,"Product":product,"GBX":gbx,
+            "Btls Case":btls_case,"Size CL":size_cl,"ABV %":abv,
+            "RF NRF":rf_nrf,"ST":st_status,"Cases Available":cases_moq,
+            "Purchase Price - Bottle":format_money(bottle_price,currency),
+            "Purchase Price - Case":format_money(case_price,currency),
+            "Currency":currency,"Incoterms":incoterms,"Leadtime":leadtime,
+            "Remark/BBD":" | ".join(remark_parts),"Source Row":str(line_number),
+            "Parse Status":"REVIEW" if any(n.startswith("Missing") for n in review_notes) else "OK",
+            "Review Flag":"YES" if review_notes else "NO",
+            "Review Notes":"; ".join(review_notes),
+        }))
+    return ensure_jvh_columns(pd.DataFrame(rows))
+
+def to_excel_bytes(df):
+    buf = io.BytesIO()
+    EURO_FORMAT = r'_ [$€-413]\ * #,##0.00_ ;_ [$€-413]\ * \-#,##0.00_ ;_ [$€-413]\ * "-"??_ ;_ @_ '
+    PRICE_COLS = {"Purchase Price - Bottle", "Purchase Price - Case",
+                  "Price per bottle", "Price per Case",
+                  "Freight cost", "Cost per case", "Margin case"}
+
+    review_df = df[df["Review Flag"]=="YES"].copy() if "Review Flag" in df.columns else pd.DataFrame(columns=df.columns)
+
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        df.to_excel(w, sheet_name="JVH Master", index=False)
+        review_df.to_excel(w, sheet_name="Review", index=False)
+
+        for sheet_name in ["JVH Master", "Review"]:
+            ws = w.sheets[sheet_name]
+            for col_idx, col_name in enumerate(df.columns, start=1):
+                if col_name in PRICE_COLS:
+                    for row in ws.iter_rows(min_row=2, min_col=col_idx, max_col=col_idx):
+                        for cell in row:
+                            if cell.value is not None and cell.value != "":
+                                cell.number_format = EURO_FORMAT
+
+    buf.seek(0)
+    return buf.getvalue()
+
+col_in, col_out = st.columns([1, 1])
+
+# ---------------------------------------------------------------------------
+# Tab structuur: Offerte Parser | Voorraad Samenvatten
+# ---------------------------------------------------------------------------
+main_tab1, main_tab2 = st.tabs(["📋 Offerte Parser", "📦 Voorraad Samenvatten"])
+
+with main_tab1:
+    col_in, col_out = st.columns([1, 1])
+
+    with col_in:
+        st.subheader("📥 Input")
+        tab_text, tab_file = st.tabs(["Tekst plakken", "Bestand uploaden"])
+        with tab_text:
+            pasted = st.text_area("Plak hier de offertetekst (email, WhatsApp, etc.)", height=400, placeholder="Plak de volledige offertetekst hier...")
+            supplier = st.text_input("Leverancier (optioneel)", placeholder="bijv. Diageo / Pernod / ...")
+        with tab_file:
+            uploaded = st.file_uploader("Upload Excel of CSV", type=["xlsx","xls","csv"])
+            supplier_f = st.text_input("Leverancier (optioneel) ", placeholder="bijv. Diageo / Pernod / ...")
+
+    with col_out:
+        st.subheader("📤 Output")
+        parsed_df = pd.DataFrame()
+        source_label = ""
+
+        if pasted and pasted.strip():
+            parsed_df = parse_offer_text(pasted)
+            source_label = supplier if supplier else "offerte"
+        elif uploaded is not None:
+            if uploaded.name.lower().endswith(".csv"):
+                raw_df = pd.read_csv(uploaded)
+            else:
+                raw_df = pd.read_excel(uploaded)
+            raw_df = raw_df.rename(columns={c: COLUMN_ALIASES.get(clean_text(c), clean_text(c)) for c in raw_df.columns})
+            if len(raw_df.columns) == 1:
+                parsed_df = parse_offer_text("\n".join(raw_df.iloc[:,0].astype(str).tolist()))
+            else:
+                parsed_df = parse_offer_text("\n".join(raw_df.astype(str).apply(" ".join, axis=1).tolist()))
+            source_label = supplier_f if supplier_f else uploaded.name
+
+        if not parsed_df.empty:
+            total = len(parsed_df)
+            ok = int((parsed_df["Review Flag"]=="NO").sum())
+            review = total - ok
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Totaal regels", total)
+            m2.metric("OK", ok)
+            m3.metric("Review nodig", review)
+            display_cols = [c for c in ["Commodity","Product","GBX","Btls Case","Size CL","Cases Available",
+                           "Purchase Price - Bottle","Purchase Price - Case","Currency",
+                           "RF NRF","ST","Incoterms","Leadtime","Remark/BBD","Parse Status"] if c in parsed_df.columns]
+            st.dataframe(parsed_df[display_cols], use_container_width=True, height=380)
+            filename = f"JVH_{source_label.replace(' ','_')}_parsed.xlsx" if source_label else "JVH_parsed.xlsx"
+            st.download_button(label="⬇️ Download Excel", data=to_excel_bytes(parsed_df), file_name=filename,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True, type="primary")
+            if review > 0:
+                with st.expander(f"⚠️ {review} regels hebben review nodig"):
+                    st.dataframe(parsed_df[parsed_df["Review Flag"]=="YES"][["Product","Review Notes"]], use_container_width=True)
+        else:
+            st.info("Plak een offerte links of upload een bestand om te beginnen.")
+
+with main_tab2:
+    st.subheader("📦 Voorraad samenvatten")
+    st.caption("Upload een CSV met productnaam en hoeveelheid — unieke producten worden samengevoegd en qty opgeteld.")
+
+    inv_file = st.file_uploader("Upload voorraad CSV", type=["csv","xlsx","xls"], key="inv_upload")
+
+    if inv_file is not None:
+        try:
+            if inv_file.name.lower().endswith(".csv"):
+                # Try different separators
+                try:
+                    inv_df = pd.read_csv(inv_file, sep="\t")
+                    if len(inv_df.columns) < 2:
+                        inv_file.seek(0)
+                        inv_df = pd.read_csv(inv_file)
+                except:
+                    inv_file.seek(0)
+                    inv_df = pd.read_csv(inv_file)
+            else:
+                inv_df = pd.read_excel(inv_file)
+
+            # Clean column names
+            inv_df.columns = [clean_text(c) for c in inv_df.columns]
+
+            # Detect product and quantity columns
+            product_col = None
+            qty_col = None
+            for col in inv_df.columns:
+                col_l = col.lower()
+                if any(k in col_l for k in ["item","product","description","omschrijving","naam","article"]):
+                    product_col = col
+                if any(k in col_l for k in ["qty","quantity","aantal","cases","hoeveelheid"]):
+                    qty_col = col
+
+            # Fallback: first col = product, last numeric = qty
+            if not product_col:
+                product_col = inv_df.columns[0]
+            if not qty_col:
+                numeric_cols = inv_df.select_dtypes(include="number").columns.tolist()
+                qty_col = numeric_cols[-1] if numeric_cols else inv_df.columns[-1]
+
+            st.caption(f"Product kolom: **{product_col}** | Qty kolom: **{qty_col}**")
+
+            # Convert qty to numeric
+            inv_df[qty_col] = pd.to_numeric(inv_df[qty_col], errors="coerce").fillna(0)
+
+            # Group by product, sum qty
+            summary = (
+                inv_df.groupby(product_col, as_index=False)[qty_col]
+                .sum()
+                .rename(columns={product_col: "Product", qty_col: "Quantity"})
+                .sort_values("Quantity", ascending=False)
+                .reset_index(drop=True)
+            )
+
+            st.metric("Unieke producten", len(summary))
+            st.dataframe(summary, use_container_width=True, height=500)
+
+            # Export
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as w:
+                summary.to_excel(w, sheet_name="Voorraad", index=False)
+            buf.seek(0)
+            st.download_button(
+                label="⬇️ Download samenvatting",
+                data=buf.getvalue(),
+                file_name="JVH_voorraad_samenvatting.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                type="primary"
+            )
+        except Exception as e:
+            st.error(f"Kan bestand niet lezen: {e}")
+
+st.markdown("---")
+st.markdown('<p style="text-align:center; color:#555; font-size:0.8rem;">JVH Global B.V. · jvh-global.com</p>', unsafe_allow_html=True)    "Lead Time":"Leadtime","Warehouse":"Incoterms","Coded":"ST","Cases Available (MOQ)":"Cases Available","Cases Available":"Cases Available",
     "RF/NRF":"RF NRF","REF/NRF":"RF NRF","producto":"Product","Producto":"Product",
     "btl/cs":"Btls Case","Btl/cs":"Btls Case","BTLS/CS":"Btls Case","CL":"Size CL","alc %":"ABV %","ABV%":"ABV %",
     "Price":"Price per bottle","price":"Price per bottle","cases":"Cases Available","CASES":"Cases Available","BRAND":"Product","SIZE LTR.":"Size LTR",
