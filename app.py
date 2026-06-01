@@ -365,6 +365,47 @@ def preprocess_text(text):
         line = re.sub(r"(?<=\d),(?=\d{3}\b)","",line)
         line = line.replace("–","-").replace("—","-")
         line = re.sub(r"(?i)^FCL\b","FTL",line)
+        # Normalize "Full load" -> "FTL"
+        line = re.sub(r"(?i)^Full\s+load\b","FTL",line)
+        line = re.sub(r"(?i)\bfull\s+load\s*:\s*","FTL ",line)
+        line = re.sub(r"(?i)\bfull\s+load\b","FTL",line)
+        # Normalize "Loen/Riga" -> "Loendersloot"
+        line = re.sub(r"(?i)\bLoen/Riga\b","Loendersloot",line)
+        line = re.sub(r"(?i)\b(?<![A-Za-z])Loen\b","Loendersloot",line)
+        # Normalize "crt" -> "cs" (carton = case)
+        line = re.sub(r"(?i)\bcrt\b","cs",line)
+        def normalize_liter_size(m):
+            try:
+                liters = float(m.group(1).replace(',','.'))
+                cl = int(round(liters * 100))
+                return f"{m.group(2)}x{cl}cl"
+            except:
+                return m.group(0)
+        line = re.sub(r"(?i)\b(\d+[.,]\d+)\s*l\s*[xX]\s*(\d+)", normalize_liter_size, line)
+        line = re.sub(r"(?i)\b(\d+)\s*l\s*[xX]\s*(\d+)", lambda m: f"{m.group(2)}x{m.group(1)}L", line)
+        # Normalize "07 x 6" (shorthand 0.7L) -> "6x70cl", "05 x 12" -> "12x50cl"
+        line = re.sub(r"(?i)\b07\s*[xX]\s*(\d+)\b(?!\s*cl)", lambda m: f"{m.group(1)}x70cl", line)
+        line = re.sub(r"(?i)\b05\s*[xX]\s*(\d+)\b(?!\s*cl)", lambda m: f"{m.group(1)}x50cl", line)
+        # Normalize "Price: N[,N] Euro/crt" or "Price: N Euro" -> "@ EUR N /cs"
+        line = re.sub(r"(?i)\bPrice\s*:\s*([\d]+[.,][\d]+)\s*E(?:uro)?(?:/(?:cs|crt|case))?\b",
+                      lambda m: f"@ EUR {m.group(1).replace(',','.')} /cs", line)
+        line = re.sub(r"(?i)\bPrice\s*:\s*([\d]+)\s*E(?:uro)?(?:/(?:cs|crt|case))?\b",
+                      lambda m: f"@ EUR {m.group(1)} /cs", line)
+        # Normalize bare "N Euro/crt" or "N,N Euro/crt" -> "@ EUR N /cs"
+        if not re.search(r"@", line):
+            line = re.sub(r"(?i)\b([\d]+[.,][\d]+)\s*E(?:uro)?/(?:cs|crt|case)\b",
+                          lambda m: f"@ EUR {m.group(1).replace(',','.')} /cs", line)
+            line = re.sub(r"(?i)\b([\d]+)\s*E(?:uro)?/(?:cs|crt|case)\b",
+                          lambda m: f"@ EUR {m.group(1)} /cs", line)
+        # "lead time:" -> strip label
+        line = re.sub(r"(?i)\blead\s*time\s*:","",line)
+        # "in stock" -> "On floor"
+        line = re.sub(r"(?i)\bin\s+stock\b","On floor",line)
+        # "in Loendersloot" / "to Loendersloot" -> "Exworks Loendersloot"
+        line = re.sub(r"(?i)\b(?:in|to)\s+Loendersloot\b","Exworks Loendersloot",line)
+        line = re.sub(r"(?i)\bin\s+Holland\b","Exworks Loendersloot",line)
+        # Strip "10% deposit" noise
+        line = re.sub(r"(?i)\b\d+%\s*deposit\w*","",line)
         # Strip WhatsApp/Telegram timestamps
         line = re.sub(r"^\[[\d\-]+,\s*[\d:]+\]\s*[^:]+:\s*","",line)
         # Strip "(T2 status)" -> keep T2 as standalone BEFORE stripping trailing noise
@@ -419,11 +460,20 @@ def preprocess_text(text):
             line = re.sub(r"\$\s*(\d+(?:[.,]\d+)?)\s*/(btl|cs)\b",r"@ USD \1 /\2",line)
         line = re.sub(r"(?i)\bex-([A-Za-z]+)",r"ex \1",line)
         line = re.sub(r"(?i)\bDuty\s*Status\s*:\s*","",line)
-        # Normalize "at 68 euro" -> "@ EUR 68 /cs"
+        # Normalize "at 68 euro/euros" -> "@ EUR 68 /cs"
         line = re.sub(r"(?i)\bat\s+([\d]+(?:[.,][\d]+)?)\s+euros?\b",
                       lambda m: f"@ EUR {m.group(1).replace(',','.')} /cs", line)
+        # Normalize "at 116 USD" -> "@ USD 116 /cs"
+        line = re.sub(r"(?i)\bat\s+([\d]+(?:[.,][\d]+)?)\s+USD\b",
+                      lambda m: f"@ USD {m.group(1).replace(',','.')} /cs", line)
+        # Normalize "at USD/EUR N" -> "@ USD/EUR N /cs"
         line = re.sub(r"(?i)\bat\s+(USD|EUR)\s+([\d]+(?:[.,][\d]+)?)\b",
                       lambda m: f"@ {m.group(1)} {m.group(2).replace(',','.')} /cs", line)
+        # Normalize "at N,NN" (no currency, bare number) -> "@ EUR N.NN /cs" (assume EUR)
+        line = re.sub(r"(?i)\bat\s+([\d]+[.,][\d]+)(?!\s*(?:USD|EUR|euro|per))\b",
+                      lambda m: f"@ EUR {m.group(1).replace(',','.')} /cs", line)
+        line = re.sub(r"(?i)\bat\s+([\d]+)(?!\s*(?:USD|EUR|euro|per|\.))\b",
+                      lambda m: f"@ EUR {m.group(1)} /cs", line)
         if not re.search(r"@\s*(EUR|USD)", line):
             line = re.sub(r"(?i)\beuro\s+(\d)",r"@ EUR \1",line)
             line = re.sub(r"(?i)\beuros\s+(\d)",r"@ EUR \1",line)
@@ -592,8 +642,12 @@ def _parse_offer_text_inner(text):
         qty_match = re.search(r"(?i)([\d,]+)\s*(cases|case|cs|bottles|bottle|btls)\b", line)
         if not qty_match and not is_ftl: continue
         if qty_match:
-            qty_raw = qty_match.group(1).replace(",","")
-            qty = 0 if qty_raw == "FTL" else int(qty_raw)
+            qty_raw = qty_match.group(1).replace(",","").strip()
+            if not qty_raw or qty_raw == "FTL":
+                qty = 0
+            else:
+                try: qty = int(qty_raw)
+                except: qty = 0
             qty_unit = "BTLS" if qty_match.group(2).lower() in {"bottles","bottle","btls"} else "CS"
         else:
             qty = 0; qty_unit = "CS"
@@ -649,6 +703,11 @@ def _parse_offer_text_inner(text):
             r"(?i)\bPrice\s*:", r"(?i)\bQty\s*:",
             r"\b\d{1,2}(?:[.,]\d+)?%\b",
             r"(?i)\bwith\b",  # strip "with" keyword
+            r"(?i)\bthe\s+floor\b",  # strip "the floor" from product name
+            r"(?i)\bcoming\b",  # strip "coming"
+            r"(?i)\bnext\s+week\b",  # strip "next week"
+            r"(?i)\b/btl\b|\b/cs\b",  # strip unit remnants
+            r"(?i)\s*/\s*(?:Riga|Loen|Loendersloot|Singapore)\b",  # strip location after /
             r"\(.*?\)",
         ]:
             product = re.sub(p,"",product)
